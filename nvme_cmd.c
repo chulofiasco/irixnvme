@@ -307,6 +307,217 @@ nvme_admin_get_log_page_error(nvme_soft_t *soft)
 }
 
 /*
+ * nvme_admin_get_features: Send Get Features command
+ *
+ * Retrieves the specified feature from the controller.
+ * The feature value is returned in DW0 of the completion queue entry.
+ *
+ * Arguments:
+ *   soft - Controller soft state
+ *   fid  - Feature Identifier (NVME_FEAT_*)
+ *   sel  - Select value (NVME_FEAT_SEL_*)
+ *
+ * Returns: 1 on success (command submitted), 0 on failure
+ */
+int
+nvme_admin_get_features(nvme_soft_t *soft, uchar_t fid, uchar_t sel)
+{
+    nvme_command_t cmd;
+
+#ifdef NVME_DBG_CMD
+    cmn_err(CE_NOTE, "nvme_admin_get_features: FID=0x%02x SEL=0x%02x", fid, sel);
+#endif
+
+    /* Build Get Features command */
+    bzero(&cmd, sizeof(cmd));
+
+    /* CDW0: Opcode (7:0), Flags (15:8), CID (31:16)
+     * Encode FID in CID so completion handler can identify which feature */
+    cmd.cdw0 = NVME_ADMIN_GET_FEATURES | (NVME_ADMIN_CID_GET_FEATURES(fid) << 16);
+
+    /* NSID: Some features are namespace-specific and require NSID=1
+     * Per NVMe 1.0e spec:
+     *   - Error Recovery (0x05): namespace-specific
+     *   - LBA Range Type (0x03): namespace-specific
+     *   - All others: controller-level (use NSID=0) */
+    if (fid == NVME_FEAT_ERROR_RECOVERY || fid == NVME_FEAT_LBA_RANGE_TYPE) {
+        cmd.nsid = 1;  /* Namespace 1 */
+    } else {
+        cmd.nsid = 0;  /* Controller-level feature */
+    }
+
+    /* CDW10: FID (7:0), SEL (9:8) */
+    cmd.cdw10 = fid | ((uint_t)sel << 8);
+
+    /* CDW11-15: Feature-specific, set to 0 for Get Features */
+    cmd.cdw11 = 0;
+    cmd.cdw12 = 0;
+    cmd.cdw13 = 0;
+    cmd.cdw14 = 0;
+    cmd.cdw15 = 0;
+
+    /* PRP: not needed for most features (data returned in completion DW0) */
+    cmd.prp1_lo = 0;
+    cmd.prp1_hi = 0;
+    cmd.prp2_lo = 0;
+    cmd.prp2_hi = 0;
+
+    /* Submit command */
+    if (nvme_submit_cmd(soft, &soft->admin_queue, &cmd) != 0) {
+#ifdef NVME_DBG
+        cmn_err(CE_WARN, "nvme_admin_get_features: failed to submit command (queue full?)");
+#endif
+        return 0;  /* Failure */
+    }
+
+#ifdef NVME_DBG_CMD
+    cmn_err(CE_NOTE, "nvme_admin_get_features: command submitted, waiting for completion");
+#endif
+    return 1;  /* Success - command submitted */
+}
+
+/*
+ * nvme_admin_set_features: Send Set Features command
+ *
+ * Sets the specified feature on the controller.
+ *
+ * Arguments:
+ *   soft  - Controller soft state
+ *   fid   - Feature Identifier (NVME_FEAT_*)
+ *   value - Feature value to set (32-bit)
+ *
+ * Returns: 1 on success (command submitted), 0 on failure
+ */
+int
+nvme_admin_set_features(nvme_soft_t *soft, uchar_t fid, uint_t value)
+{
+    nvme_command_t cmd;
+
+#ifdef NVME_DBG_CMD
+    cmn_err(CE_NOTE, "nvme_admin_set_features: FID=0x%02x value=0x%08x", fid, value);
+#endif
+
+    /* Build Set Features command */
+    bzero(&cmd, sizeof(cmd));
+
+    /* CDW0: Opcode (7:0), Flags (15:8), CID (31:16) */
+    cmd.cdw0 = NVME_ADMIN_SET_FEATURES | (NVME_ADMIN_CID_SET_FEATURES << 16);
+
+    /* NSID: not used for most features */
+    cmd.nsid = 0;
+
+    /* CDW10: FID (7:0) */
+    cmd.cdw10 = fid;
+
+    /* CDW11: Feature value (feature-dependent) */
+    cmd.cdw11 = value;
+
+    /* CDW12-15: Feature-specific, set to 0 */
+    cmd.cdw12 = 0;
+    cmd.cdw13 = 0;
+    cmd.cdw14 = 0;
+    cmd.cdw15 = 0;
+
+    /* PRP: not needed for most features */
+    cmd.prp1_lo = 0;
+    cmd.prp1_hi = 0;
+    cmd.prp2_lo = 0;
+    cmd.prp2_hi = 0;
+
+    /* Submit command */
+    if (nvme_submit_cmd(soft, &soft->admin_queue, &cmd) != 0) {
+#ifdef NVME_DBG
+        cmn_err(CE_WARN, "nvme_admin_set_features: failed to submit command (queue full?)");
+#endif
+        return 0;  /* Failure */
+    }
+
+#ifdef NVME_DBG_CMD
+    cmn_err(CE_NOTE, "nvme_admin_set_features: command submitted, waiting for completion");
+#endif
+    return 1;  /* Success - command submitted */
+}
+
+/*
+ * nvme_admin_query_features: Query common controller features
+ *
+ * Queries a set of common features and stores them in the soft state.
+ * This should be called during controller initialization after Identify.
+ *
+ * Features queried:
+ *   - Arbitration
+ *   - Power Management
+ *   - Temperature Threshold
+ *   - Error Recovery
+ *   - Volatile Write Cache
+ *   - Number of Queues
+ *   - Interrupt Coalescing
+ *   - Write Atomicity
+ *   - Async Event Config
+ *
+ * Returns: 1 on success, 0 on failure
+ */
+int
+nvme_admin_query_features(nvme_soft_t *soft)
+{
+    /* List of features to query (FID only - MIPS Pro C can't handle non-const struct init) */
+    static const uchar_t feature_ids[] = {
+        NVME_FEAT_ARBITRATION,
+        NVME_FEAT_POWER_MANAGEMENT,
+        NVME_FEAT_TEMPERATURE_THRESHOLD,
+        NVME_FEAT_ERROR_RECOVERY,
+        NVME_FEAT_VOLATILE_WRITE_CACHE,
+        NVME_FEAT_NUMBER_OF_QUEUES,
+        NVME_FEAT_INTERRUPT_COALESCING,
+        NVME_FEAT_WRITE_ATOMICITY,
+        NVME_FEAT_ASYNC_EVENT_CONFIG
+    };
+    static const char *feature_names[] = {
+        "Arbitration",
+        "Power Management",
+        "Temperature Threshold",
+        "Error Recovery",
+        "Volatile Write Cache",
+        "Number of Queues",
+        "Interrupt Coalescing",
+        "Write Atomicity",
+        "Async Event Config"
+    };
+    int num_features = sizeof(feature_ids) / sizeof(feature_ids[0]);
+    int i;
+
+#ifdef NVME_DBG
+    cmn_err(CE_NOTE, "nvme_admin_query_features: querying %d features", num_features);
+#endif
+
+    /* Query each feature in sequence */
+    for (i = 0; i < num_features; i++) {
+        /* Submit Get Features command with SEL_SUPPORTED to discover capabilities */
+        if (!nvme_admin_get_features(soft, feature_ids[i], NVME_FEAT_SEL_SUPPORTED)) {
+            cmn_err(CE_WARN, "nvme_admin_query_features: failed to submit Get Features for %s (FID 0x%02x)",
+                    feature_names[i], feature_ids[i]);
+            return 0;
+        }
+
+        /* Wait for completion by polling */
+        while (!nvme_process_completions(soft, &soft->admin_queue)) {
+            us_delay(1000);  /* Wait 1ms between polls */
+        }
+
+        /* Feature value is stored in soft state by the completion handler
+         * based on the FID encoded in the CID */
+
+#ifdef NVME_DBG
+        cmn_err(CE_NOTE, "nvme_admin_query_features: %s (FID 0x%02x) queried",
+                feature_names[i], feature_ids[i]);
+#endif
+    }
+
+    cmn_err(CE_NOTE, "nvme: Queried %d controller features", num_features);
+    return 1;
+}
+
+/*
  * nvme_admin_create_cq: Create I/O Completion Queue
  */
 int
@@ -560,7 +771,7 @@ nvme_get_translated_addr(nvme_soft_t *soft, alenlist_t alenlist, size_t maxlengt
     /* Translate to PCI bus address with explicit cast to quiet warnings */
     address = pciio_dmatrans_addr(soft->pci_vhdl, NULL, (paddr_t)address, length,
                                   PCIIO_DMA_DATA | DMATRANS64 | PCIIO_BYTE_STREAM
-#if defined(IP30) || defined(IP35)
+#ifdef NVME_OVERLY_SAFE_DMA
                                   | ((flags & NF_WRITE) ? PCIIO_NOPREFETCH : PCIBR_BARRIER)
 #endif
                                 );
@@ -598,7 +809,7 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
 {
     scsi_request_t *req = ps->req;
     ps->alenlist = NULL;
-    ps->need_unlock = 0;
+    ps->alenlist_type = NVME_ALENLIST_SUPPLIED;
 
     if (req->sr_buffer == NULL && !(req->sr_flags & (SRF_ALENLIST | SRF_MAPBP))) {
         cmn_err(CE_WARN, "nvme_prepare_alenlist: NULL buffer with flags:0x%x buflen:%u buffer:%p", req->sr_flags, req->sr_buflen, req->sr_buffer);
@@ -628,15 +839,30 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
 #ifdef NVME_DBG
         cmn_err(CE_NOTE, "nvme_prepare_alenlist: using user alenlist from bp->b_private");
 #endif
-        /* Don't lock/unlock - we don't own this alenlist */
+        ps->alenlist_type = NVME_ALENLIST_SUPPLIED;
     } else {
         /*
-         * For MAPBP/MAP/MAPUSER: use pre-allocated alenlist (avoids dynamic allocation failures)
-         * Lock it to prevent concurrent use, following ql.c pattern
+         * For MAPBP/MAP/MAPUSER: Choose allocation strategy based on request size
+         * Small requests: Use dynamic alenlist (no lock contention)
+         * Large requests: Use shared pre-allocated alenlist (needs lock)
          */
-        mutex_lock(&soft->alenlist_lock, PZERO);
-        ps->need_unlock = 1;
-        ps->alenlist = soft->alenlist;
+        if (req->sr_buflen < NVME_ALENLIST_SMALL_PAGES * NBPP) {
+            /* Small request - allocate dedicated alenlist to avoid lock contention */
+            ps->alenlist = alenlist_create(0);
+            if (ps->alenlist) {
+                ps->alenlist_type = NVME_ALENLIST_DYNAMIC;
+            } else {
+                /* Allocation failed - fall back to shared alenlist */
+                mutex_lock(&soft->alenlist_lock, PZERO);
+                ps->alenlist = soft->alenlist;
+                ps->alenlist_type = NVME_ALENLIST_SHARED;
+            }
+        } else {
+            /* Large request - use shared pre-allocated alenlist with lock */
+            mutex_lock(&soft->alenlist_lock, PZERO);
+            ps->alenlist = soft->alenlist;
+            ps->alenlist_type = NVME_ALENLIST_SHARED;
+        }
 
         if (req->sr_flags & SRF_MAPBP) {
             /*
@@ -644,7 +870,7 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
              */
             if (BP_ISMAPPED(((buf_t *)(req->sr_bp)))) {
                 cmn_err(CE_WARN, "nvme_prepare_alenlist: SRF_MAPBP but buffer is already mapped");
-                mutex_unlock(&soft->alenlist_lock);
+                nvme_cleanup_alenlist(soft, ps);
                 return 0;
             }
 
@@ -667,7 +893,7 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
             /* Convert buf_t to alenlist (buf_to_alenlist clears the alenlist first) */
             if (buf_to_alenlist(ps->alenlist, (buf_t *)(req->sr_bp), AL_NOCOMPACT) == NULL) {
                 cmn_err(CE_WARN, "nvme_prepare_alenlist: buf_to_alenlist failed");
-                mutex_unlock(&soft->alenlist_lock);
+                nvme_cleanup_alenlist(soft, ps);
                 return 0;
             }
 
@@ -689,9 +915,8 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
                 cmn_err(CE_WARN, "nvme_prepare_alenlist: buffer not dword-aligned (addr=0x%lx)",
                         (__psunsigned_t)req->sr_buffer);
 #endif
-                mutex_unlock(&soft->alenlist_lock);
+                nvme_cleanup_alenlist(soft, ps);
                 nvme_set_adapter_status(req, SC_ALIGN, ST_GOOD);
-                
                 return -1;
             }
             if ((req->sr_buflen & 0x3) != 0) {
@@ -699,7 +924,7 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
                 cmn_err(CE_WARN, "nvme_prepare_alenlist: length not dword-aligned (len=%u)",
                         req->sr_buflen);
 #endif
-                mutex_unlock(&soft->alenlist_lock);
+                nvme_cleanup_alenlist(soft, ps);
                 nvme_set_adapter_status(req, SC_ALIGN, ST_GOOD);
                 return -1;
             }
@@ -722,22 +947,22 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
 
             /* Convert to alenlist based on address type */
             if (is_user_addr) {
-                /* User virtual address - use uvaddr_to_alenlist with pre-allocated alenlist */
+                /* User virtual address - use uvaddr_to_alenlist */
                 if (uvaddr_to_alenlist(ps->alenlist, (uvaddr_t)req->sr_buffer,
                                        req->sr_buflen, 0) == NULL) {
                     cmn_err(CE_WARN, "nvme_prepare_alenlist: uvaddr_to_alenlist failed");
-                    mutex_unlock(&soft->alenlist_lock);
+                    nvme_cleanup_alenlist(soft, ps);
                     return 0;
                 }
 #ifdef NVME_DBG
                 cmn_err(CE_NOTE, "nvme_prepare_alenlist: converted uvaddr to alenlist (KUSEG)");
 #endif
             } else {
-                /* Kernel virtual address - use kvaddr_to_alenlist with pre-allocated alenlist */
+                /* Kernel virtual address - use kvaddr_to_alenlist */
                 if (kvaddr_to_alenlist(ps->alenlist, (caddr_t)req->sr_buffer,
                                        req->sr_buflen, AL_NOCOMPACT) == NULL) {
                     cmn_err(CE_WARN, "nvme_prepare_alenlist: kvaddr_to_alenlist failed");
-                    mutex_unlock(&soft->alenlist_lock);
+                    nvme_cleanup_alenlist(soft, ps);
                     return 0;
                 }
 #ifdef NVME_DBG
@@ -751,7 +976,7 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
              */
             cmn_err(CE_WARN, "nvme_prepare_alenlist: no valid buffer mapping flag set (sr_flags=0x%x)",
                     req->sr_flags);
-            mutex_unlock(&soft->alenlist_lock);
+            nvme_cleanup_alenlist(soft, ps);
             return 0;
         }
     }
@@ -765,20 +990,22 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
 }
 
 /*
- * nvme_cleanup_alenlist: Clean up alenlist resources
+ * nvme_cleanup_alenlist: Cleanup alenlist based on allocation type
  *
- * Unlocks the alenlist lock if it was locked during nvme_prepare_alenlist().
- *
- * Arguments:
- *   soft        - Controller state
- *   need_unlock - If 1, unlock soft->alenlist_lock
+ * Handles cleanup for different alenlist types:
+ * - SUPPLIED: No cleanup needed (owned by caller)
+ * - SHARED: Unlock the shared alenlist mutex
+ * - DYNAMIC: Destroy the dynamically allocated alenlist
  */
 void
-nvme_cleanup_alenlist(nvme_soft_t *soft, int need_unlock)
+nvme_cleanup_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
 {
-    if (need_unlock) {
+    if (ps->alenlist_type == NVME_ALENLIST_SHARED) {
         mutex_unlock(&soft->alenlist_lock);
+    } else if (ps->alenlist_type == NVME_ALENLIST_DYNAMIC) {
+        alenlist_destroy(ps->alenlist);
     }
+    /* NVME_ALENLIST_SUPPLIED requires no cleanup */
 }
 
 /*

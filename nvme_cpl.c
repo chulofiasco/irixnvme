@@ -180,12 +180,23 @@ nvme_handle_admin_completion(nvme_soft_t *soft, nvme_queue_t *q, nvme_completion
             uint_t max_pages = (1 << soft->mdts);
             soft->max_transfer_blocks = (max_pages * (1u << (soft->min_page_size + 12))) / 512;
         }
+
+        /* Decode ONCS (Optional NVM Command Support) */
+        {
+            ushort_t oncs = NVME_MEMRDBS(&id_ctrl->oncs);
+            soft->oncs_compare = (oncs & NVME_ONCS_COMPARE) ? 1 : 0;
+            soft->oncs_dataset_mgmt = (oncs & NVME_ONCS_DSM) ? 1 : 0;
+            soft->oncs_verify = (oncs & NVME_ONCS_VERIFY) ? 1 : 0;
+        }
+
 //#ifdef NVME_DBG
         cmn_err(CE_NOTE, "nvme: Controller - SN=%s, Model=%s, FW=%s, NS=%d",
                 soft->serial, soft->model, soft->firmware_rev, soft->num_namespaces);
         cmn_err(CE_NOTE, "nvme: MDTS=%d (max transfer = %d blocks = %d KB)",
                 soft->mdts, soft->max_transfer_blocks,
                 (soft->max_transfer_blocks * 512) / 1024);
+        cmn_err(CE_NOTE, "nvme: ONCS - Compare:%d DSM(TRIM):%d Verify:%d",
+                soft->oncs_compare, soft->oncs_dataset_mgmt, soft->oncs_verify);
 //#endif
         break;
 
@@ -279,7 +290,50 @@ nvme_handle_admin_completion(nvme_soft_t *soft, nvme_queue_t *q, nvme_completion
         break;
     }
 
+    case NVME_ADMIN_CID_SET_FEATURES:
+#ifdef NVME_DBG
+        cmn_err(CE_NOTE, "nvme_handle_admin_completion: processing Set Features");
+#endif
+        /* Set Features completion - DW0 may contain previous feature value */
+        cmn_err(CE_NOTE, "nvme: Set Features completed (previous value=0x%08x)", cpl->dw0);
+        break;
+
     default:
+        /* Check if this is a Get Features completion (CID in range 16-31) */
+        if (NVME_ADMIN_CID_IS_GET_FEATURES(cid)) {
+            uint_t feature_value = cpl->dw0;
+            uchar_t fid = NVME_ADMIN_CID_EXTRACT_FID(cid);
+
+            /* Store feature capability bitmask (from SEL=SUPPORTED query) in array indexed by FID */
+            if (fid < 16) {
+                soft->features[fid] = feature_value;
+
+                /* Log which features are supported (non-zero means changeable bits exist) */
+                if (feature_value) {
+                    const char *feature_name;
+                    switch (fid) {
+                    case NVME_FEAT_ARBITRATION:           feature_name = "Arbitration"; break;
+                    case NVME_FEAT_POWER_MANAGEMENT:      feature_name = "Power Management"; break;
+                    case NVME_FEAT_LBA_RANGE_TYPE:        feature_name = "LBA Range Type"; break;
+                    case NVME_FEAT_TEMPERATURE_THRESHOLD: feature_name = "Temperature Threshold"; break;
+                    case NVME_FEAT_ERROR_RECOVERY:        feature_name = "Error Recovery"; break;
+                    case NVME_FEAT_VOLATILE_WRITE_CACHE:  feature_name = "Volatile Write Cache"; break;
+                    case NVME_FEAT_NUMBER_OF_QUEUES:      feature_name = "Number of Queues"; break;
+                    case NVME_FEAT_INTERRUPT_COALESCING:  feature_name = "Interrupt Coalescing"; break;
+                    case NVME_FEAT_INTERRUPT_VECTOR_CONFIG: feature_name = "Interrupt Vector Config"; break;
+                    case NVME_FEAT_WRITE_ATOMICITY:       feature_name = "Write Atomicity"; break;
+                    case NVME_FEAT_ASYNC_EVENT_CONFIG:    feature_name = "Async Event Config"; break;
+                    default:                              feature_name = "Unknown"; break;
+                    }
+                    cmn_err(CE_NOTE, "nvme: Feature 0x%02x (%s) supported (capability mask=0x%08x)",
+                            fid, feature_name, feature_value);
+                }
+            } else {
+                cmn_err(CE_WARN, "nvme: Get Features FID=0x%02x out of range", fid);
+            }
+            break;
+        }
+
         /* Check if this is an abort command completion */
         if (NVME_ADMIN_CID_IS_ABORT(cid)) {
             ushort_t aborted_cid = NVME_ADMIN_CID_GET_ABORTED_CID(cid);

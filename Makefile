@@ -17,7 +17,7 @@ include /var/sysgen/Makefile.kernloadio
 
 COMMON_FLAGS=
 COMMON_LDFLAGS=-v
-COMMON_CFLAGS=
+COMMON_CFLAGS=-O3
 LDFLAGS_IP35=-nostdlib -64 -mips4
 LDFLAGS_IP30=-nostdlib -64 -mips4
 LDFLAGS_IP32=-nostdlib -n32 -mips3

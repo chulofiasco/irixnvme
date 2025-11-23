@@ -10,6 +10,7 @@
 #define noNVME_COMPLETION_INTERRUPT
 #define noNVME_FORCE_4K
 #define noNVME_TEST
+#define noNVME_OVERLY_SAFE_DMA
 
 /* IP32 can mix and match swapping regions because it is all address based
    IP30 and IP35 has endianess set per PCI slot, so everything has to be bytestream 
@@ -360,6 +361,16 @@ typedef struct nvme_soft_s {
     uchar_t             model[41];      /* Model number (40 bytes + null terminator) */
     uchar_t             firmware_rev[9]; /* Firmware revision (8 bytes + null terminator) */
 
+    /* Controller Features (from Get Features commands with SEL=SUPPORTED)
+     * Array indexed by FID - stores capability bitmask showing which bits are changeable.
+     * Value of 0 means feature not supported or not changeable. */
+    uint_t              features[16];               /* Features 0x00-0x0F */
+
+    /* Optional NVMe Command Support (ONCS) from Identify Controller */
+    uchar_t             oncs_compare;               /* Bit 0: Compare command supported */
+    uchar_t             oncs_dataset_mgmt;          /* Bit 2: Dataset Management (TRIM) supported */
+    uchar_t             oncs_verify;                /* Bit 5: Verify command supported */
+
 #ifdef NVME_TEST
     volatile unsigned int test_cid;
 #endif
@@ -373,6 +384,15 @@ typedef struct nvme_soft_s {
 #define NVME_ADMIN_CID_DELETE_SQ             5
 #define NVME_ADMIN_CID_DELETE_CQ             6
 #define NVME_ADMIN_CID_GET_LOG_PAGE_ERROR    7
+#define NVME_ADMIN_CID_SET_FEATURES          8
+
+/* Get Features CIDs: Reserve CIDs 16-31 for Get Features (16 slots)
+ * CID = 16 + FID, so we can extract FID from CID in completion handler */
+#define NVME_ADMIN_CID_GET_FEATURES_BASE     16
+#define NVME_ADMIN_CID_GET_FEATURES_END      31
+#define NVME_ADMIN_CID_GET_FEATURES(fid)     (NVME_ADMIN_CID_GET_FEATURES_BASE + (fid))
+#define NVME_ADMIN_CID_IS_GET_FEATURES(cid)  ((cid) >= NVME_ADMIN_CID_GET_FEATURES_BASE && (cid) <= NVME_ADMIN_CID_GET_FEATURES_END)
+#define NVME_ADMIN_CID_EXTRACT_FID(cid)      ((cid) - NVME_ADMIN_CID_GET_FEATURES_BASE)
 
 /* Special CIDs for ordered I/O commands not associated with scsi_request */
 #define NVME_IO_CID_FLUSH                    0x8000
@@ -388,10 +408,18 @@ typedef struct nvme_soft_s {
  * Function Prototypes - nvme_cmd.c
  */
 
+/* Alenlist allocation strategy thresholds */
+#define NVME_ALENLIST_SMALL_PAGES  16  /* Use dynamic alenlist for requests <= 16 pages (64KB) */
+
+/* Alenlist type tracking for cleanup */
+#define NVME_ALENLIST_SUPPLIED     0   /* Alenlist supplied by SCSI layer (sr_ha_alenlist) */
+#define NVME_ALENLIST_DYNAMIC      1   /* Dynamically allocated, needs alenlist_destroy() */
+#define NVME_ALENLIST_SHARED       2   /* Using shared alenlist, needs mutex_unlock() */
+
 typedef struct nvme_rwcmd_state_s {
     scsi_request_t *req;
     alenlist_t alenlist;
-    int need_unlock;
+    int alenlist_type;  /* NVME_ALENLIST_* - tracks cleanup method */
     __uint64_t lba;
     uint_t buflen;
     uint_t num_blocks;
@@ -414,6 +442,9 @@ int nvme_admin_create_sq(nvme_soft_t *soft, ushort_t qid, ushort_t qsize,
 int nvme_admin_delete_sq(nvme_soft_t *soft, ushort_t qid);
 int nvme_admin_delete_cq(nvme_soft_t *soft, ushort_t qid);
 int nvme_admin_abort_command(nvme_soft_t *soft, ushort_t cid);
+int nvme_admin_get_features(nvme_soft_t *soft, uchar_t fid, uchar_t sel);
+int nvme_admin_set_features(nvme_soft_t *soft, uchar_t fid, uint_t value);
+int nvme_admin_query_features(nvme_soft_t *soft);
 
 int nvme_submit_cmd(nvme_soft_t *soft, nvme_queue_t *q, nvme_command_t *cmd);
 int nvme_wait_for_completion(nvme_queue_t *q, ushort_t cid, uint_t timeout_ms);
@@ -430,8 +461,7 @@ int nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps);
 
 int nvme_io_build_rw_command(nvme_soft_t *soft, nvme_rwcmd_state_t *ps);
 int nvme_build_prps_from_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps);
-
-void nvme_cleanup_alenlist(nvme_soft_t *soft, int need_unlock);
+void nvme_cleanup_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps);
 
 int nvme_prp_pool_init(nvme_soft_t *soft);
 void nvme_prp_pool_done(nvme_soft_t *soft);
@@ -490,6 +520,9 @@ int nvme_ctlr_reset(nvme_soft_t *soft);
 int nvme_ctlr_init(nvme_soft_t *soft);
 int nvme_ctlr_shutdown(nvme_soft_t *soft);
 void nvme_dump_controller_state(nvme_soft_t *soft, const char *context);
+
+/* Helper to wait for queue to drain completions */
+int nvme_wait_for_queue_idle(nvme_soft_t *soft, nvme_queue_t *q, uint_t timeout_ms);
 void nvme_dump_sq_entry(nvme_command_t *cmd, const char *context);
 void nvme_dump_memory(void *addr, size_t len, const char *context);
 void nvme_dump_pci_bridge(vertex_hdl_t conn);

@@ -1180,36 +1180,51 @@ nvme_initialize(nvme_soft_t *soft)
     nvme_dump_controller_state(soft, "After submitting Identify Controller command");
 #endif /* NVME_DBG_EXTRA */
 #ifndef NVME_COMPLETION_MANUAL
-    while (!nvme_process_completions(soft, &soft->admin_queue)) {
-        us_delay(1000);
-    }
+    nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
 #endif
     if (!nvme_admin_identify_namespace(soft)) {
         goto err_free_utility_buffer;
     }
 #ifndef NVME_COMPLETION_MANUAL
-    while (!nvme_process_completions(soft, &soft->admin_queue)) {
-        us_delay(1000);
-    }
+    nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
 #endif
     if (!nvme_admin_create_cq(soft, soft->io_queue.qid, soft->io_queue.size,
                               soft->io_queue.cq_phys, soft->io_queue.vector)) {
         goto err_free_utility_buffer;
     }
 #ifndef NVME_COMPLETION_MANUAL
-    while (!nvme_process_completions(soft, &soft->admin_queue)) {
-        us_delay(1000);
-    }
+    nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
 #endif
     if (!nvme_admin_create_sq(soft, soft->io_queue.qid, soft->io_queue.size,
                               soft->io_queue.sq_phys, soft->io_queue.qid)) {
         goto err_free_utility_buffer;
     }
 #ifndef NVME_COMPLETION_MANUAL
-    while (!nvme_process_completions(soft, &soft->admin_queue)) {
-        us_delay(1000);
-    }
+    nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
 #endif
+
+    /* Query controller features to discover capabilities */
+    if (!nvme_admin_query_features(soft)) {
+        cmn_err(CE_WARN, "nvme_attach: failed to query controller features (continuing anyway)");
+        /* Non-fatal - continue initialization even if feature query fails */
+    }
+
+    /* Configure interrupt coalescing if supported
+     * Coalesce after 10 completions OR 500 microseconds (whichever comes first)
+     * Time calculation: 10 × 4KB reads over 33MHz PCI ≈ 400us, use 500us for margin
+     * CDW11 format: Threshold (7:0), Time (31:8) in 100us units */
+    if (soft->features[NVME_FEAT_INTERRUPT_COALESCING]) {
+        uint_t coalesce_value = 10 | (5 << 8);  /* 10 completions, 500us (5 × 100us) */
+
+        if (nvme_admin_set_features(soft, NVME_FEAT_INTERRUPT_COALESCING, coalesce_value)) {
+#ifndef NVME_COMPLETION_MANUAL
+            nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
+#endif
+            cmn_err(CE_NOTE, "nvme: Interrupt coalescing configured (10 completions, 500us)");
+        } else {
+            cmn_err(CE_WARN, "nvme: Failed to configure interrupt coalescing");
+        }
+    }
 
     /* Start timeout watchdog for checking hung commands */
     nvme_timeout_watchdog_start(soft);
@@ -1270,6 +1285,64 @@ err_out:
 }
 
 /*
+ * nvme_wait_for_queue_idle: Wait for queue to drain all outstanding commands
+ *
+ * Polls the completion queue until all outstanding commands complete or timeout.
+ * Returns 0 on success (queue idle), -1 on timeout.
+ */
+int
+nvme_wait_for_queue_idle(nvme_soft_t *soft, nvme_queue_t *q, uint_t timeout_ms)
+{
+    int elapsed_ms = 0;
+    int processed;
+    int outstanding;
+
+    /* Read outstanding counter atomically */
+    outstanding = atomicAddInt((int *)&q->outstanding, 0);
+
+#ifdef NVME_DBG
+    cmn_err(CE_NOTE, "nvme_wait_for_queue_idle: waiting for queue %d (outstanding=%d, timeout=%dms)",
+            q->qid, outstanding, timeout_ms);
+#endif
+
+    /* Poll completions until queue is idle or timeout */
+    while (outstanding > 0 && elapsed_ms < timeout_ms) {
+        processed = nvme_process_completions(soft, q);
+
+#ifdef NVME_DBG_EXTRA
+        if (processed > 0) {
+            cmn_err(CE_NOTE, "nvme_wait_for_queue_idle: processed %d completions (outstanding=%d)",
+                    processed, outstanding);
+        }
+#endif
+
+        /* Re-read outstanding counter atomically */
+        outstanding = atomicAddInt((int *)&q->outstanding, 0);
+
+        if (outstanding == 0) {
+            break;
+        }
+
+        /* Sleep 1ms between polls */
+        us_delay(1000);
+        elapsed_ms++;
+    }
+
+    if (outstanding > 0) {
+#ifdef NVME_DBG
+        cmn_err(CE_WARN, "nvme_wait_for_queue_idle: timeout waiting for queue %d (still %d outstanding)",
+                q->qid, outstanding);
+#endif
+        return -1;
+    }
+
+#ifdef NVME_DBG
+    cmn_err(CE_NOTE, "nvme_wait_for_queue_idle: queue %d is idle (took %dms)", q->qid, elapsed_ms);
+#endif
+    return 0;
+}
+
+/*
  * nvme_shutdown: Shutdown NVMe controller cleanly
  */
 static int
@@ -1283,29 +1356,62 @@ nvme_shutdown(nvme_soft_t *soft)
     cmn_err(CE_NOTE, "nvme: shutting down controller");
 #endif
 
-    /* Stop timeout watchdog */
+    /* Stop timeout watchdog - no more commands should time out */
     nvme_timeout_watchdog_stop(soft);
 
-    /* Stop completion watchdog timer before freeing I/O queue */
+    /* Wait for any in-flight I/O commands to complete (5 second timeout) */
+#ifdef NVME_DBG
+    cmn_err(CE_NOTE, "nvme: waiting for I/O queue to drain");
+#endif
+    nvme_wait_for_queue_idle(soft, &soft->io_queue, 5000);
+
+    /* Stop completion watchdog timers */
     nvme_watchdog_stop(&soft->io_queue);
     nvme_watchdog_stop(&soft->admin_queue);
 
     /*
-     * Disable interrupts before shutting down
-     * 1. Mask all NVMe interrupts (write to INTMS)
-     * 2. Disable interrupts in PCI command register
+     * Delete I/O queues using admin commands (must happen BEFORE disabling controller)
+     * This is the proper NVMe shutdown sequence:
+     * 1. Delete I/O Submission Queue
+     * 2. Wait for completion
+     * 3. Delete I/O Completion Queue
+     * 4. Wait for completion
      */
 #ifdef NVME_DBG
-    cmn_err(CE_NOTE, "nvme: disabling interrupts");
+    cmn_err(CE_NOTE, "nvme: deleting I/O submission queue");
 #endif
-    /* Request clean shutdown */
+    if (nvme_admin_delete_sq(soft, soft->io_queue.qid)) {
+        nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
+#ifdef NVME_DBG
+        cmn_err(CE_NOTE, "nvme: I/O submission queue deleted");
+#endif
+    } else {
+        cmn_err(CE_WARN, "nvme: failed to delete I/O submission queue");
+    }
+
+#ifdef NVME_DBG
+    cmn_err(CE_NOTE, "nvme: deleting I/O completion queue");
+#endif
+    if (nvme_admin_delete_cq(soft, soft->io_queue.qid)) {
+        nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
+#ifdef NVME_DBG
+        cmn_err(CE_NOTE, "nvme: I/O completion queue deleted");
+#endif
+    } else {
+        cmn_err(CE_WARN, "nvme: failed to delete I/O completion queue");
+    }
+
+    /* Request clean shutdown via CC register */
+#ifdef NVME_DBG
+    cmn_err(CE_NOTE, "nvme: requesting controller shutdown");
+#endif
     cc = NVME_RD(soft, NVME_REG_CC);
     cc &= ~NVME_CC_SHN_MASK;
     cc |= NVME_CC_SHN_NORMAL;
     NVME_WR(soft, NVME_REG_CC, cc);
 
-    /* Wait for shutdown to complete */
-    timeout = 1000;  /* 1 seconds */
+    /* Wait for shutdown to complete (1 second timeout) */
+    timeout = 1000;
     while (timeout > 0) {
         csts = NVME_RD(soft, NVME_REG_CSTS);
         if ((csts & NVME_CSTS_SHST_MASK) == NVME_CSTS_SHST_COMPLETE) {
@@ -1322,12 +1428,13 @@ nvme_shutdown(nvme_soft_t *soft)
         cmn_err(CE_NOTE, "nvme: shutdown complete");
     }
 #endif
+
     /* Disable controller */
     cc = NVME_RD(soft, NVME_REG_CC);
     cc &= ~NVME_CC_ENABLE;
     NVME_WR(soft, NVME_REG_CC, cc);
 
-    /* Wait for not ready */
+    /* Wait for controller to become not ready */
     nvme_wait_for_ready(soft, 0, 5000);
 
     /* Free utility buffer */
@@ -1348,6 +1455,9 @@ nvme_shutdown(nvme_soft_t *soft)
 
     /* Destroy I/O command tracking lock */
     mutex_destroy(&soft->io_requests_lock);
+
+    /* Destroy aborted command tracking lock */
+    mutex_destroy(&soft->aborted_lock);
 #ifdef NVME_UTILBUF_USEDMAP
     pciio_dmamap_free(soft->utility_buffer_dmamap);
 #endif
@@ -1400,6 +1510,12 @@ nvme_intr(
     if (!soft || !soft->initialized) {
         return;
     }
+
+    /* Mask NVMe interrupts to prevent interrupt flooding while service thread processes completions.
+     * IRIX uses two-level interrupt model: hard interrupt signals service thread, which runs here.
+     * Without masking, hard interrupts would keep firing while we process, wasting CPU cycles. */
+    NVME_WR(soft, NVME_REG_INTMS, 0x1);  /* Set bit 0 to mask INTx interrupt */
+
     /* Process admin queue completions */
     admin_processed = nvme_process_completions(soft, &soft->admin_queue);
 
@@ -1413,6 +1529,10 @@ nvme_intr(
                 admin_processed, io_processed);
     }
 #endif
+
+    /* Re-enable NVMe interrupts. If there are still completions pending,
+     * the level-triggered INTx will fire again immediately. */
+    NVME_WR(soft, NVME_REG_INTMC, 0x1);  /* Clear bit 0 to unmask INTx interrupt */
 }
 
 static int
@@ -1514,7 +1634,7 @@ static int
 nvme_disable_interrupts(nvme_soft_t *soft)
 {
     ushort_t command;
-    
+
     if (!soft->interrupts_enabled)
         return 0;
 
@@ -1959,30 +2079,16 @@ nvme_attach(vertex_hdl_t conn)
          * since we're doing the actual probing here.
          */
         {
-            vertex_hdl_t targ_vhdl, lun_vhdl;
+            vertex_hdl_t lun_vhdl;
             uint_t targ = 0;
             uint_t lun = 0;
 
-            /* Create target vertex */
-            targ_vhdl = scsi_targ_vertex_add(ctlr_vhdl, targ);
-            if (targ_vhdl == GRAPH_VERTEX_NONE) {
-#ifdef NVME_DBG
-                cmn_err(CE_WARN, "nvme_attach: unable to create target vertex");
-#endif
-                hwgraph_vertex_destroy(ctlr_vhdl);
-                nvme_shutdown(soft);
-                pciio_piomap_free(bar0_map);
-                DEL(soft);
-                return -1;
-            }
-
-            /* Create LUN vertex */
-            lun_vhdl = scsi_lun_vertex_add(targ_vhdl, lun);
+            /* Create target and LUN vertices */
+            lun_vhdl = scsi_device_add(ctlr_vhdl, targ, lun);
             if (lun_vhdl == GRAPH_VERTEX_NONE) {
 #ifdef NVME_DBG
-                cmn_err(CE_WARN, "nvme_attach: unable to create LUN vertex");
+                cmn_err(CE_WARN, "nvme_attach: unable to create device vertices");
 #endif
-                hwgraph_vertex_destroy(targ_vhdl);
                 hwgraph_vertex_destroy(ctlr_vhdl);
                 nvme_shutdown(soft);
                 pciio_piomap_free(bar0_map);
@@ -2051,19 +2157,72 @@ nvme_attach(vertex_hdl_t conn)
 }
 
 /*
+ * nvme_remove_disk_aliases: Remove disk device aliases from /hw/disk or /hw/rdisk
+ */
+static void
+nvme_remove_disk_aliases(const char *disk_label, uint_t adap, uint_t targ)
+{
+    vertex_hdl_t disk_vhdl;
+    char dks_name[32];
+    int part;
+
+    if (hwgraph_traverse(hwgraph_root, disk_label, &disk_vhdl) == GRAPH_SUCCESS) {
+        /* Remove whole disk entry */
+        sprintf(dks_name, "dks%dd%d", SCSI_EXT_CTLR(adap), targ);
+        hwgraph_edge_remove(disk_vhdl, dks_name, NULL);
+
+        /* Remove partition entries (vh, vol, s0-s15) */
+        sprintf(dks_name, "dks%dd%dvh", SCSI_EXT_CTLR(adap), targ);
+        hwgraph_edge_remove(disk_vhdl, dks_name, NULL);
+        sprintf(dks_name, "dks%dd%dvol", SCSI_EXT_CTLR(adap), targ);
+        hwgraph_edge_remove(disk_vhdl, dks_name, NULL);
+        for (part = 0; part < 16; part++) {
+            sprintf(dks_name, "dks%dd%ds%d", SCSI_EXT_CTLR(adap), targ, part);
+            hwgraph_edge_remove(disk_vhdl, dks_name, NULL);
+        }
+    }
+}
+
+/*
  * nvme_detach: called when device is being removed
  */
 int
 nvme_detach(vertex_hdl_t conn)
 {
     nvme_soft_t        *soft;
-    vertex_hdl_t        ctlr_vhdl, lun_vhdl;
+    vertex_hdl_t        ctlr_vhdl;
     uint_t              targ = 0;
     uint_t              lun = 0;
+    uint_t              class_code;
+    pciio_info_t        pciioinfo;
 
 #ifdef NVME_DBG
     cmn_err(CE_NOTE, "nvme_detach: detaching device");
 #endif
+
+    /*
+     * We registered with wildcards (-1, -1), so detach is called for EVERY PCI device.
+     * Check the class code to ensure this is actually an NVMe device before proceeding.
+     */
+    if (!conn) {
+        return -1;
+    }
+    pciioinfo = pciio_info_get(conn);
+    if (pciioinfo == NULL) {
+        return -1;
+    }
+    if (pciio_info_vendor_id_get(pciioinfo) < 0) {
+        return -1;
+    }
+
+    /* Read class code to verify this is an NVMe device */
+    class_code = (uint_t)pciio_config_get(conn, PCI_CFG_CLASS_CODE, 4) & 0x00FFFFFF;
+
+    if (class_code != NVME_CLASS_CODE) {
+        /* Not an NVMe device, silently ignore */
+        return -1;
+    }
+
     /* Get SCSI controller vertex from the "scsi" edge on the PCI connection */
     if (hwgraph_edge_get(conn, EDGE_LBL_SCSI, &ctlr_vhdl) != GRAPH_SUCCESS) {
 #ifdef NVME_DBG
@@ -2072,7 +2231,6 @@ nvme_detach(vertex_hdl_t conn)
         return -1;
     }
 
-    /* Get soft state from SCI_INFO (like ql.c does) */
     {
         scsi_ctlr_info_t *ctlr_info = scsi_ctlr_info_get(ctlr_vhdl);
         if (!ctlr_info) {
@@ -2082,7 +2240,7 @@ nvme_detach(vertex_hdl_t conn)
             hwgraph_vertex_unref(ctlr_vhdl);
             return -1;
         }
-        soft = (nvme_soft_t *)SCI_INFO(ctlr_info);
+        soft = SCI_INFO(ctlr_info);
         if (!soft) {
 #ifdef NVME_DBG
             cmn_err(CE_WARN, "nvme_detach: no soft state in SCI_INFO");
@@ -2092,14 +2250,34 @@ nvme_detach(vertex_hdl_t conn)
         }
     }
 
-    /* Remove LUN and target vertices (target 0, lun 0) */
-    lun_vhdl = scsi_lun_vhdl_get(ctlr_vhdl, targ, lun);
-    if (lun_vhdl != GRAPH_VERTEX_NONE) {
-        /* Remove LUN vertex - if this was the last LUN, remove target too */
-        if (scsi_lun_vertex_remove(lun_vhdl, lun) == GRAPH_VERTEX_NONE) {
-            scsi_targ_vertex_remove(ctlr_vhdl, targ);
+    /* Remove inventory entries BEFORE removing vertices */
+    {
+        vertex_hdl_t lun_vhdl = scsi_lun_vhdl_get(ctlr_vhdl, targ, lun);
+        if (lun_vhdl != GRAPH_VERTEX_NONE) {
+            /* Remove disk inventory (-1 matches any value) */
+            hwgraph_inventory_remove(lun_vhdl, -1, -1, -1, -1, -1);
+        }
+        /* Remove controller inventory (-1 matches any value) */
+        hwgraph_inventory_remove(ctlr_vhdl, -1, -1, -1, -1, -1);
+    }
+
+    /* Remove SCSI device (LUN and target vertices) */
+    scsi_device_remove(ctlr_vhdl, targ, lun);
+
+    /* Remove /hw/scsi_ctlr/%d link */
+    {
+        vertex_hdl_t scsi_ctlr_vhdl;
+        char edge_name[5];
+        sprintf(edge_name, "%d", SCSI_EXT_CTLR(soft->adap));
+        if (hwgraph_traverse(hwgraph_root, EDGE_LBL_SCSI_CTLR, &scsi_ctlr_vhdl) == GRAPH_SUCCESS) {
+            hwgraph_edge_remove(scsi_ctlr_vhdl, edge_name, NULL);
         }
     }
+
+    /* Remove disk device aliases (dks entries in /hw/disk and /hw/rdisk) */
+    nvme_remove_disk_aliases(EDGE_LBL_DISK, soft->adap, targ);
+    nvme_remove_disk_aliases(EDGE_LBL_RDISK, soft->adap, targ);
+
 #ifdef NVME_COMPLETION_INTERRUPT
     /* Disable interrupts */
     nvme_disable_interrupts(soft);

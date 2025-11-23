@@ -749,7 +749,7 @@ error_cleanup_cids:
     }
 error_cleanup_alenlist:
     /* Clean up alenlist */
-    nvme_cleanup_alenlist(soft, s.need_unlock);
+    nvme_cleanup_alenlist(soft, &s);
 
 error:
     /* Atomically decrement refcount by 1 (for the initial +1 at start) */
@@ -804,7 +804,6 @@ nvme_scsi_command(scsi_request_t *req)
         goto done;
     }
 
-    /* Get controller info and extract our soft state from SCI_INFO (like ql.c does) */
     {
         scsi_ctlr_info_t *ctlr_info = SLI_CTLR_INFO(lun_info);
         if (!ctlr_info) {
@@ -947,7 +946,6 @@ nvme_scsi_info(vertex_hdl_t lun_vhdl)
         return NULL;
     }
 
-    /* Get our soft state from SCI_INFO (like ql.c does) */
     {
         scsi_ctlr_info_t *ctlr_info = SLI_CTLR_INFO(lun_info);
         if (!ctlr_info) {
