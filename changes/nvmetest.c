@@ -168,6 +168,7 @@ int main(int argc, char *argv[])
             fprintf(stderr, "  - Check if driver is loaded:  ml list | grep nvme\n");
             fprintf(stderr, "  - Check available controllers: ls /hw/scsi_ctlr/\n");
             fprintf(stderr, "  - Load driver: smake load\n");
+            fprintf(stderr, "  - Run full setup: smake setup\n");
             exit(1);
         }
     }

@@ -201,7 +201,7 @@ nvme_unload(void)
 {
     cmn_err(CE_NOTE, "nvme_unload: unloading NVMe driver");
 
-    pciio_iterate("nvme_", nvme_unloadme);
+    /* Device detachment is now handled in nvme_unreg */
 
     return 0;
 }
@@ -240,6 +240,7 @@ nvme_unreg(void)
 {
     cmn_err(CE_NOTE, "nvme_unreg: unregistering NVMe driver");
 
+    /* pciio_driver_unregister will automatically call nvme_detach for attached devices */
     pciio_driver_unregister("nvme_");
 
     return 0;
@@ -1919,30 +1920,24 @@ nvme_attach(vertex_hdl_t conn)
 #endif
         /*
          * Create link from /hw/scsi_ctlr/<N> to the actual controller vertex
-         * This makes the controller discoverable
-         * at the standard system location.
+         * This makes the controller discoverable at the standard system location.
          */
         if (ctlr_vhdl != GRAPH_VERTEX_NONE) {
-            char src_name[10], edge_name[5];
-            char *path_relative;
-
-            /* Get the full path to the controller vertex */
+            char edge_name[16];
+            vertex_hdl_t scsi_ctlr_dir;
+            
             vertex_to_name(ctlr_vhdl, loc_str, LOC_STR_MAX_LEN);
 
-            /* Strip /hw/ prefix - hwgraph_link_add expects paths relative to hwgraph_root */
-            path_relative = loc_str;
-            if (strncmp(path_relative, "/hw/", 4) == 0) {
-                path_relative += 4;
-            }
-
-            sprintf(src_name, "%s", EDGE_LBL_SCSI_CTLR);
-            sprintf(edge_name, "%d", SCSI_EXT_CTLR(soft->adap));
-
-            hwgraph_link_add(path_relative, src_name, edge_name);
+            /* Get or create /hw/scsi_ctlr directory */
+            if (hwgraph_path_add(hwgraph_root, EDGE_LBL_SCSI_CTLR, &scsi_ctlr_dir) == GRAPH_SUCCESS) {
+                sprintf(edge_name, "%d", SCSI_EXT_CTLR(soft->adap));
+                hwgraph_edge_add(scsi_ctlr_dir, ctlr_vhdl, edge_name);
+                
 #ifdef NVME_DBG
-            cmn_err(CE_NOTE, "nvme_attach: created /hw/scsi_ctlr/%d link to /hw/%s",
-                    SCSI_EXT_CTLR(soft->adap), path_relative);
+                cmn_err(CE_NOTE, "nvme_attach: created /hw/%s link as /hw/scsi_ctlr/%d",
+                        loc_str + 4, SCSI_EXT_CTLR(soft->adap));
 #endif
+            }
         }
 
         /*
@@ -2067,24 +2062,22 @@ int
 nvme_detach(vertex_hdl_t conn)
 {
     nvme_soft_t        *soft;
-    vertex_hdl_t        ctlr_vhdl, lun_vhdl;
-    uint_t              targ = 0;
-    uint_t              lun = 0;
+    vertex_hdl_t        ctlr_vhdl;
 
 #ifdef NVME_DBG
     cmn_err(CE_NOTE, "nvme_detach: detaching device");
 #endif
+
     /* Get SCSI controller vertex from the "scsi" edge on the PCI connection */
     if (hwgraph_edge_get(conn, EDGE_LBL_SCSI, &ctlr_vhdl) != GRAPH_SUCCESS) {
-#ifdef NVME_DBG
-        cmn_err(CE_WARN, "nvme_detach: unable to find SCSI controller vertex");
-#endif
+        /* No "scsi" edge - device was never attached or already detached */
         return -1;
     }
 
     /* Get soft state from SCI_INFO (like ql.c does) */
     {
         scsi_ctlr_info_t *ctlr_info = scsi_ctlr_info_get(ctlr_vhdl);
+        
         if (!ctlr_info) {
 #ifdef NVME_DBG
             cmn_err(CE_WARN, "nvme_detach: unable to get controller info");
@@ -2093,6 +2086,7 @@ nvme_detach(vertex_hdl_t conn)
             return -1;
         }
         soft = (nvme_soft_t *)SCI_INFO(ctlr_info);
+        
         if (!soft) {
 #ifdef NVME_DBG
             cmn_err(CE_WARN, "nvme_detach: no soft state in SCI_INFO");
@@ -2102,14 +2096,11 @@ nvme_detach(vertex_hdl_t conn)
         }
     }
 
-    /* Remove LUN and target vertices (target 0, lun 0) */
-    lun_vhdl = scsi_lun_vhdl_get(ctlr_vhdl, targ, lun);
-    if (lun_vhdl != GRAPH_VERTEX_NONE) {
-        /* Remove LUN vertex - if this was the last LUN, remove target too */
-        if (scsi_lun_vertex_remove(lun_vhdl, lun) == GRAPH_VERTEX_NONE) {
-            scsi_targ_vertex_remove(ctlr_vhdl, targ);
-        }
-    }
+    /* Skip explicit LUN/target vertex removal during driver unload
+     * The SCSI layer and hwgraph will clean these up automatically
+     * when we destroy the controller vertex.
+     */
+
 #ifdef NVME_COMPLETION_INTERRUPT
     /* Disable interrupts */
     nvme_disable_interrupts(soft);
@@ -2125,11 +2116,22 @@ nvme_detach(vertex_hdl_t conn)
     if (soft->bar0_map)
         pciio_piomap_free(soft->bar0_map);
 
+    /* Note: Inventory entries are automatically removed when vertices are destroyed
+     * IRIX does not provide device_inventory_remove() - hinv caches may persist
+     * until system reboot or ioconfig refresh */
+
+    /* Remove the "scsi" edge to prevent double-detach */
+    hwgraph_edge_remove(conn, EDGE_LBL_SCSI, NULL);
+    
     /* Destroy SCSI controller vertex */
     hwgraph_vertex_destroy(ctlr_vhdl);
 
     DEL(soft);
 
+#ifdef NVME_DBG
+    cmn_err(CE_NOTE, "nvme_detach: complete");
+#endif
+    
     return 0;
 }
 
@@ -2621,7 +2623,8 @@ nvme_reloadme(vertex_hdl_t conn)
 static void
 nvme_unloadme(vertex_hdl_t conn)
 {
-    cmn_err(CE_NOTE, "nvme_unloadme: unloading device");
+    /* Not used - pciio_driver_unregister handles detach automatically */
+    cmn_err(CE_NOTE, "nvme_unloadme: called for conn=0x%x (no action needed)", conn);
 }
 
 /* =====================================================================
