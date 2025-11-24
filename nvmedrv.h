@@ -10,7 +10,6 @@
 #define noNVME_COMPLETION_INTERRUPT
 #define noNVME_FORCE_4K
 #define noNVME_TEST
-#define noNVME_OVERLY_SAFE_DMA
 
 /* IP32 can mix and match swapping regions because it is all address based
    IP30 and IP35 has endianess set per PCI slot, so everything has to be bytestream 

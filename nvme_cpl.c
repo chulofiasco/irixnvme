@@ -183,7 +183,7 @@ nvme_handle_admin_completion(nvme_soft_t *soft, nvme_queue_t *q, nvme_completion
 
         /* Decode ONCS (Optional NVM Command Support) */
         {
-            ushort_t oncs = NVME_MEMRDBS(&id_ctrl->oncs);
+            __uint32_t oncs = NVME_MEMRDBS(&id_ctrl->oncs);
             soft->oncs_compare = (oncs & NVME_ONCS_COMPARE) ? 1 : 0;
             soft->oncs_dataset_mgmt = (oncs & NVME_ONCS_DSM) ? 1 : 0;
             soft->oncs_verify = (oncs & NVME_ONCS_VERIFY) ? 1 : 0;
@@ -331,11 +331,7 @@ nvme_handle_admin_completion(nvme_soft_t *soft, nvme_queue_t *q, nvme_completion
             } else {
                 cmn_err(CE_WARN, "nvme: Get Features FID=0x%02x out of range", fid);
             }
-            break;
-        }
-
-        /* Check if this is an abort command completion */
-        if (NVME_ADMIN_CID_IS_ABORT(cid)) {
+        } else if (NVME_ADMIN_CID_IS_ABORT(cid)) {
             ushort_t aborted_cid = NVME_ADMIN_CID_GET_ABORTED_CID(cid);
 
             if (status_code == NVME_SC_SUCCESS) {
@@ -350,7 +346,6 @@ nvme_handle_admin_completion(nvme_soft_t *soft, nvme_queue_t *q, nvme_completion
             cmn_err(CE_NOTE, "nvme_handle_admin_completion: command CID %d completed", cid);
 #endif
         }
-        break;
     }
 }
 

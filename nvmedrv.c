@@ -1510,12 +1510,6 @@ nvme_intr(
     if (!soft || !soft->initialized) {
         return;
     }
-
-    /* Mask NVMe interrupts to prevent interrupt flooding while service thread processes completions.
-     * IRIX uses two-level interrupt model: hard interrupt signals service thread, which runs here.
-     * Without masking, hard interrupts would keep firing while we process, wasting CPU cycles. */
-    NVME_WR(soft, NVME_REG_INTMS, 0x1);  /* Set bit 0 to mask INTx interrupt */
-
     /* Process admin queue completions */
     admin_processed = nvme_process_completions(soft, &soft->admin_queue);
 
@@ -1529,10 +1523,6 @@ nvme_intr(
                 admin_processed, io_processed);
     }
 #endif
-
-    /* Re-enable NVMe interrupts. If there are still completions pending,
-     * the level-triggered INTx will fire again immediately. */
-    NVME_WR(soft, NVME_REG_INTMC, 0x1);  /* Clear bit 0 to unmask INTx interrupt */
 }
 
 static int
@@ -1954,7 +1944,7 @@ nvme_attach(vertex_hdl_t conn)
     {
         scsi_ctlr_info_t *scsi_info;
         vertex_hdl_t ctlr_vhdl;
-        char loc_str[LOC_STR_MAX_LEN];
+        char loc_str[MAXDEVNAME];
         int slot;
 
         /* Get PCI slot number for logging */
@@ -2033,26 +2023,27 @@ nvme_attach(vertex_hdl_t conn)
          * at the standard system location.
          */
         if (ctlr_vhdl != GRAPH_VERTEX_NONE) {
-            char src_name[10], edge_name[5];
-            char *path_relative;
+            int ret;
 
             /* Get the full path to the controller vertex */
-            vertex_to_name(ctlr_vhdl, loc_str, LOC_STR_MAX_LEN);
+            ret = hwgraph_vertex_name_get(ctlr_vhdl, loc_str, MAXDEVNAME);
+            if (ret != 0) {
+                cmn_err(CE_WARN, "nvme_attach: hwgraph_vertex_name_get failed with ret=%d, ctlr_vhdl=0x%x",
+                        ret, ctlr_vhdl);
+            } else {
+                char src_name[10], edge_name[5];
+                char *path_relative;
+                /* Strip /hw/ prefix - hwgraph_link_add expects paths relative to hwgraph_root */
+                path_relative = loc_str;
+                if (strncmp(path_relative, "/hw/", 4) == 0) {
+                    path_relative += 4;
+                }
 
-            /* Strip /hw/ prefix - hwgraph_link_add expects paths relative to hwgraph_root */
-            path_relative = loc_str;
-            if (strncmp(path_relative, "/hw/", 4) == 0) {
-                path_relative += 4;
+                sprintf(src_name, "%s", EDGE_LBL_SCSI_CTLR);
+                sprintf(edge_name, "%d", SCSI_EXT_CTLR(soft->adap));
+
+                hwgraph_link_add(path_relative, src_name, edge_name);
             }
-
-            sprintf(src_name, "%s", EDGE_LBL_SCSI_CTLR);
-            sprintf(edge_name, "%d", SCSI_EXT_CTLR(soft->adap));
-
-            hwgraph_link_add(path_relative, src_name, edge_name);
-#ifdef NVME_DBG
-            cmn_err(CE_NOTE, "nvme_attach: created /hw/scsi_ctlr/%d link to /hw/%s",
-                    SCSI_EXT_CTLR(soft->adap), path_relative);
-#endif
         }
 
         /*
@@ -2160,7 +2151,7 @@ nvme_attach(vertex_hdl_t conn)
  * nvme_remove_disk_aliases: Remove disk device aliases from /hw/disk or /hw/rdisk
  */
 static void
-nvme_remove_disk_aliases(const char *disk_label, uint_t adap, uint_t targ)
+nvme_remove_disk_aliases(char *disk_label, uint_t adap, uint_t targ)
 {
     vertex_hdl_t disk_vhdl;
     char dks_name[32];

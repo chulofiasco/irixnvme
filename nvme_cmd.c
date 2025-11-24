@@ -499,10 +499,9 @@ nvme_admin_query_features(nvme_soft_t *soft)
             return 0;
         }
 
-        /* Wait for completion by polling */
-        while (!nvme_process_completions(soft, &soft->admin_queue)) {
-            us_delay(1000);  /* Wait 1ms between polls */
-        }
+#ifndef NVME_COMPLETION_MANUAL
+        nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
+#endif
 
         /* Feature value is stored in soft state by the completion handler
          * based on the FID encoded in the CID */
@@ -771,7 +770,7 @@ nvme_get_translated_addr(nvme_soft_t *soft, alenlist_t alenlist, size_t maxlengt
     /* Translate to PCI bus address with explicit cast to quiet warnings */
     address = pciio_dmatrans_addr(soft->pci_vhdl, NULL, (paddr_t)address, length,
                                   PCIIO_DMA_DATA | DMATRANS64 | PCIIO_BYTE_STREAM
-#ifdef NVME_OVERLY_SAFE_DMA
+#if defined(IP30) || defined(IP35)
                                   | ((flags & NF_WRITE) ? PCIIO_NOPREFETCH : PCIBR_BARRIER)
 #endif
                                 );
@@ -846,6 +845,7 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
          * Small requests: Use dynamic alenlist (no lock contention)
          * Large requests: Use shared pre-allocated alenlist (needs lock)
          */
+  
         if (req->sr_buflen < NVME_ALENLIST_SMALL_PAGES * NBPP) {
             /* Small request - allocate dedicated alenlist to avoid lock contention */
             ps->alenlist = alenlist_create(0);
