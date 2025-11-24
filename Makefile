@@ -218,24 +218,17 @@ install: $(MODULE)
 	@echo "\$$\$$\$$" >> /var/sysgen/master.d/nvme
 	@echo "nvme_" >> /var/sysgen/master.d/nvme
 	@echo "" >> /var/sysgen/master.d/nvme
-	@echo "Creating /var/sysgen/system/nvme.sm to auto-load at boot..."
-	@if [ ! -d /var/sysgen/system ]; then mkdir -p /var/sysgen/system; fi
-	@echo "* NVMe Driver Auto-Load Configuration" > /var/sysgen/system/nvme.sm
-	@echo "*" >> /var/sysgen/system/nvme.sm
-	@echo "* This tells the system to load nvme.o at boot time" >> /var/sysgen/system/nvme.sm
-	@echo "*" >> /var/sysgen/system/nvme.sm
-	@echo "LOADADDR: /var/sysgen/boot/nvme.o" >> /var/sysgen/system/nvme.sm
-	@echo "" >> /var/sysgen/system/nvme.sm
 	@echo ""
 	@echo "Driver installed to /var/sysgen/boot/nvme.o"
-	@echo "Configuration files created:"
-	@echo "  /var/sysgen/master.d/nvme"
-	@echo "  /var/sysgen/system/nvme.sm"
+	@echo "Configuration file created: /var/sysgen/master.d/nvme"
 	@echo ""
 	@echo "Next steps:"
 	@echo "  1. Run: autoconfig"
 	@echo "  2. Reboot the system"
-	@echo "  3. The NVMe driver will load automatically at boot"
+	@echo "  3. Load manually after boot: ml ld -v -c /var/sysgen/boot/nvme.o -p nvme_ -s -1 -t 0"
+	@echo ""
+	@echo "Note: Loadable modules are not auto-loaded at boot by default."
+	@echo "To load automatically, add to /etc/init.d/network or create a startup script."
 	@echo ""
 	@echo "To verify after reboot:"
 	@echo "  hinv | grep -i scsi"
@@ -255,11 +248,7 @@ uninstall:
 		rm -f /var/sysgen/master.d/nvme; \
 		echo "Removed /var/sysgen/master.d/nvme"; \
 	fi
-	@if [ -f /var/sysgen/system/nvme.sm ]; then \
-		rm -f /var/sysgen/system/nvme.sm; \
-		echo "Removed /var/sysgen/system/nvme.sm"; \
-	fi
-	@echo "Run 'autoconfig' and reboot to complete uninstallation"
+	@echo "Run 'autoconfig' to update kernel configuration"
 
 reboot:
 	shutdown -y -g0 -i6
