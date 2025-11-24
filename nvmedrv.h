@@ -327,6 +327,11 @@ typedef struct nvme_soft_s {
     uchar_t             mdts;           /* Maximum Data Transfer Size (2^n pages, 0=unlimited) */
     uint_t              max_transfer_blocks; /* Maximum transfer in blocks (calculated from MDTS) */
 
+    /* Optional NVM Command Set capabilities (ONCS) */
+    int                 oncs_compare;        /* Supports Compare command */
+    int                 oncs_dataset_mgmt;   /* Supports Dataset Management (TRIM) */
+    int                 oncs_verify;         /* Supports Verify command */
+
     /* Namespace information - we and everyone in the world only use ns 1 */
     __uint64_t          num_blocks;     /* Total blocks */
     uint_t              block_size;     /* Block size in bytes */

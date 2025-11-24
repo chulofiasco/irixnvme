@@ -75,7 +75,8 @@ nvme_submit_cmd(nvme_soft_t *soft, nvme_queue_t *q, nvme_command_t *cmd)
 #endif
     /* Ring doorbell to notify controller */
     NVME_WR(soft, q->sq_doorbell, q->sq_tail);
-    pciio_write_gather_flush(soft->pci_vhdl); // make sure these post on IP30
+    /* Note: pciio_write_gather_flush removed - can cause PIO errors if controller locks up.
+     * XBow/Bridge handles write ordering; explicit flush not needed on IP35. */
 
 #ifdef NVME_DBG_EXTRA
     /* Verify the doorbell was written */
@@ -721,7 +722,7 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
 
             /*
              * Cache flush - direction determines the cache operation
-             * also in case workaround is needed use the workaround version firs
+             * also in case workaround is needed use the workaround version first
              * but follow with normal version because workaround rereads the cache lines
              */
             if (req->sr_flags & SRF_FLUSH) {
@@ -1003,12 +1004,13 @@ nvme_prp_pool_init(nvme_soft_t *soft)
 {
     int pages;
 
-    /* Allocate pool memory (64 pages = 256KB) */
+    /* Allocate pool memory: NVME_PRP_POOL_SIZE NVMe pages (e.g., 64 * 4KB = 256KB) 
+     * btop() converts total bytes to IRIX system pages */
     pages = (int)btop(NVME_PRP_POOL_SIZE * soft->nvme_page_size); 
     
 #ifdef NVME_DBG
-    cmn_err(CE_NOTE, "nvme_prp_pool_init: allocating PRP pool (%d pages, %d bytes)",
-            pages, pages * NBPP);
+    cmn_err(CE_NOTE, "nvme_prp_pool_init: allocating %d NVMe pages (%d IRIX pages, %d bytes)",
+            NVME_PRP_POOL_SIZE, pages, pages * NBPP);
 #endif
     soft->prp_pool = kvpalloc(pages,
                               VM_UNCACHED | VM_PHYSCONTIG | VM_DIRECT | VM_NOSLEEP,

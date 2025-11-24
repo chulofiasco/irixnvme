@@ -62,12 +62,12 @@ int
 nvme_process_completions(nvme_soft_t *soft, nvme_queue_t *q)
 {
     nvme_completion_t cpl;
-    ushort_t status;
     ushort_t sq_head;
     int count = 0;
 
     while (1) {
-        NVME_RD(soft, NVME_REG_CSTS); // make PCI bridge complete all DMA write transactions    
+        /* Note: CSTS read removed - causes PIO errors if controller locks up.
+         * On IP35/XBow, DMA completion is guaranteed by phase bit coherency. */
         mutex_lock(&q->lock, PZERO);
 
         nvme_read_completion(&cpl, q);
@@ -93,17 +93,17 @@ nvme_process_completions(nvme_soft_t *soft, nvme_queue_t *q)
         /* Advance head */
         q->cq_head++;
         NVME_WR(soft, q->cq_doorbell, (q->cq_head & q->size_mask));
-        pciio_write_gather_flush(soft->pci_vhdl); // make sure these post on IP30
+        /* Note: pciio_write_gather_flush removed - can cause PIO errors if controller locks up.
+         * XBow/Bridge handles write ordering; explicit flush not needed on IP35. */
 
         mutex_unlock(&q->lock);
         /* Process this completion - calls sr_notify with NO locks held */
-        status = cpl.dw3 >> 17; // bit 16 is phase
         q->cpl_handler(soft, q, &cpl);
         count++;
 
 #ifdef NVME_DBG
         cmn_err(CE_NOTE, "nvme_process_completions: CID %d, status 0x%x, SQ_HEAD %d (outstanding=%d)",
-                cpl.dw3 & 0xFFFF, status, sq_head, q->outstanding);
+                cpl.dw3 & 0xFFFF, cpl.dw3 >> 17, sq_head, q->outstanding);
 #endif
         
     }
@@ -180,12 +180,23 @@ nvme_handle_admin_completion(nvme_soft_t *soft, nvme_queue_t *q, nvme_completion
             uint_t max_pages = (1 << soft->mdts);
             soft->max_transfer_blocks = (max_pages * (1u << (soft->min_page_size + 12))) / 512;
         }
+
+        /* Decode ONCS (Optional NVM Command Support) */
+        {
+            __uint32_t oncs = NVME_MEMRDBS(&id_ctrl->oncs);
+            soft->oncs_compare = (oncs & NVME_ONCS_COMPARE) ? 1 : 0;
+            soft->oncs_dataset_mgmt = (oncs & NVME_ONCS_DSM) ? 1 : 0;
+            soft->oncs_verify = (oncs & NVME_ONCS_VERIFY) ? 1 : 0;
+        }
+
 //#ifdef NVME_DBG
         cmn_err(CE_NOTE, "nvme: Controller - SN=%s, Model=%s, FW=%s, NS=%d",
                 soft->serial, soft->model, soft->firmware_rev, soft->num_namespaces);
         cmn_err(CE_NOTE, "nvme: MDTS=%d (max transfer = %d blocks = %d KB)",
                 soft->mdts, soft->max_transfer_blocks,
                 (soft->max_transfer_blocks * 512) / 1024);
+        cmn_err(CE_NOTE, "nvme: ONCS - Compare:%d DSM(TRIM):%d Verify:%d",
+                soft->oncs_compare, soft->oncs_dataset_mgmt, soft->oncs_verify);
 //#endif
         break;
 
