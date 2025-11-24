@@ -21,8 +21,8 @@ COMMON_CFLAGS=
 LDFLAGS_IP35=-nostdlib -64 -mips4
 LDFLAGS_IP30=-nostdlib -64 -mips4
 LDFLAGS_IP32=-nostdlib -n32 -mips3
-MYCFLAGS_IP35=-mips4 -DPTE_64BIT -DNVME_FORCE_4K -O2
-MYCFLAGS_IP30=-mips4 -DPTE_64BIT -DHEART_INVALIDATE_WAR -DNVME_FORCE_4K -O2
+MYCFLAGS_IP35=-mips4 -DPTE_64BIT -DNVME_FORCE_4K
+MYCFLAGS_IP30=-mips4 -DPTE_64BIT -DHEART_INVALIDATE_WAR -DNVME_FORCE_4K
 MYCFLAGS_IP32=-mips3
 
 #if $(CPUBOARD) == "IP30"
@@ -177,8 +177,8 @@ setup:
 	if [ -f mkparts ]; then ./mkparts $$CTLR; fi
 	@echo ""
 	@echo "=== Setup Complete! ==="
+	@echo ""
 	@CTLR=`cat /tmp/nvme_ctlr.txt`; \
-	echo ""; \
 	echo "NVMe controller assigned to: $$CTLR"; \
 	echo ""; \
 	echo "Next steps:"; \
@@ -207,8 +207,30 @@ install: $(MODULE)
 		exit 1; \
 	fi
 	cp $(MODULE) /var/sysgen/boot/nvme.o
+	@echo "Creating /var/sysgen/master.d/nvme configuration..."
+	@echo "*" > /var/sysgen/master.d/nvme
+	@echo "* NVMe Driver Configuration" >> /var/sysgen/master.d/nvme
+	@echo "*" >> /var/sysgen/master.d/nvme
+	@echo "* This file tells lboot to include the NVMe driver in the kernel" >> /var/sysgen/master.d/nvme
+	@echo "*" >> /var/sysgen/master.d/nvme
+	@echo "+thread" >> /var/sysgen/master.d/nvme
+	@echo "" >> /var/sysgen/master.d/nvme
+	@echo "\$$\$$\$$" >> /var/sysgen/master.d/nvme
+	@echo "nvme_" >> /var/sysgen/master.d/nvme
+	@echo "" >> /var/sysgen/master.d/nvme
+	@echo "Creating /var/sysgen/system/nvme.sm to auto-load at boot..."
+	@if [ ! -d /var/sysgen/system ]; then mkdir -p /var/sysgen/system; fi
+	@echo "* NVMe Driver Auto-Load Configuration" > /var/sysgen/system/nvme.sm
+	@echo "*" >> /var/sysgen/system/nvme.sm
+	@echo "* This tells the system to load nvme.o at boot time" >> /var/sysgen/system/nvme.sm
+	@echo "*" >> /var/sysgen/system/nvme.sm
+	@echo "LOADADDR: /var/sysgen/boot/nvme.o" >> /var/sysgen/system/nvme.sm
+	@echo "" >> /var/sysgen/system/nvme.sm
 	@echo ""
 	@echo "Driver installed to /var/sysgen/boot/nvme.o"
+	@echo "Configuration files created:"
+	@echo "  /var/sysgen/master.d/nvme"
+	@echo "  /var/sysgen/system/nvme.sm"
 	@echo ""
 	@echo "Next steps:"
 	@echo "  1. Run: autoconfig"
@@ -226,10 +248,18 @@ uninstall:
 	@if [ -f /var/sysgen/boot/nvme.o ]; then \
 		rm -f /var/sysgen/boot/nvme.o; \
 		echo "Removed /var/sysgen/boot/nvme.o"; \
-		echo "Run 'autoconfig' and reboot to complete uninstallation"; \
 	else \
-		echo "Driver not installed in /var/sysgen/boot/"; \
+		echo "Driver not found in /var/sysgen/boot/"; \
 	fi
+	@if [ -f /var/sysgen/master.d/nvme ]; then \
+		rm -f /var/sysgen/master.d/nvme; \
+		echo "Removed /var/sysgen/master.d/nvme"; \
+	fi
+	@if [ -f /var/sysgen/system/nvme.sm ]; then \
+		rm -f /var/sysgen/system/nvme.sm; \
+		echo "Removed /var/sysgen/system/nvme.sm"; \
+	fi
+	@echo "Run 'autoconfig' and reboot to complete uninstallation"
 
 reboot:
 	shutdown -y -g0 -i6
