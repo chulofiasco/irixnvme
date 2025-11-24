@@ -385,13 +385,23 @@ typedef struct nvme_soft_s {
 #define NVME_ADMIN_CID_GET_ABORTED_CID(cid)  ((cid) & NVME_ADMIN_CID_ABORT_CID_MASK)
 
 /*
+ * Alenlist management - dynamic allocation for small requests to reduce lock contention
+ */
+#define NVME_ALENLIST_SMALL_PAGES  16  /* Use dynamic alenlist for requests <= 16 pages (64KB) */
+
+/* Alenlist type tracking for proper cleanup */
+#define NVME_ALENLIST_SUPPLIED     0   /* Alenlist supplied by SCSI layer (sr_ha_alenlist) */
+#define NVME_ALENLIST_DYNAMIC      1   /* Dynamically allocated, needs alenlist_destroy() */
+#define NVME_ALENLIST_SHARED       2   /* Using shared alenlist, needs mutex_unlock() */
+
+/*
  * Function Prototypes - nvme_cmd.c
  */
 
 typedef struct nvme_rwcmd_state_s {
     scsi_request_t *req;
     alenlist_t alenlist;
-    int need_unlock;
+    int alenlist_type;  /* NVME_ALENLIST_* - tracks cleanup method */
     __uint64_t lba;
     uint_t buflen;
     uint_t num_blocks;
@@ -427,11 +437,10 @@ int nvme_get_translated_addr(nvme_soft_t *soft,
                              int flags);
 
 int nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps);
+void nvme_cleanup_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps);
 
 int nvme_io_build_rw_command(nvme_soft_t *soft, nvme_rwcmd_state_t *ps);
 int nvme_build_prps_from_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps);
-
-void nvme_cleanup_alenlist(nvme_soft_t *soft, int need_unlock);
 
 int nvme_prp_pool_init(nvme_soft_t *soft);
 void nvme_prp_pool_done(nvme_soft_t *soft);

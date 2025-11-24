@@ -224,8 +224,15 @@ typedef struct _nvme_identify_controller {
     uchar_t mdts;                       /* Offset 77: MDTS - Maximum Data Transfer Size (2^n pages, 0=unlimited) */
     uchar_t reserved1[438];             /* Offset 78-515 */
     __uint32_t number_of_namespaces;    /* Offset 516 (NN field) */
-    uchar_t reserved2[3576];            /* Offset 520-4095 (rest of 4096 byte structure) */
+    ushort_t oncs;                      /* Offset 520: Optional NVM Command Support */
+    uchar_t reserved2[3574];            /* Offset 522-4095 (rest of 4096 byte structure) */
 } nvme_identify_controller_t;
+
+/* ONCS (Optional NVM Command Support) bit definitions - offset 520 */
+#define NVME_ONCS_COMPARE       0x0001  /* Bit 0: Compare command supported */
+#define NVME_ONCS_WRITE_UNCORR  0x0002  /* Bit 1: Write Uncorrectable command supported */
+#define NVME_ONCS_DSM           0x0004  /* Bit 2: Dataset Management (TRIM/UNMAP) supported */
+#define NVME_ONCS_VERIFY        0x0020  /* Bit 5: Verify command supported */
 
 /*
  * NVMe LBA Format Structure (used in Identify Namespace)

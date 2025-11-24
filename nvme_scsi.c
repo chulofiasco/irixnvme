@@ -749,7 +749,7 @@ error_cleanup_cids:
     }
 error_cleanup_alenlist:
     /* Clean up alenlist */
-    nvme_cleanup_alenlist(soft, s.need_unlock);
+    nvme_cleanup_alenlist(soft, &s);
 
 error:
     /* Atomically decrement refcount by 1 (for the initial +1 at start) */

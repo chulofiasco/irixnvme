@@ -560,9 +560,9 @@ nvme_get_translated_addr(nvme_soft_t *soft, alenlist_t alenlist, size_t maxlengt
     /* Translate to PCI bus address with explicit cast to quiet warnings */
     address = pciio_dmatrans_addr(soft->pci_vhdl, NULL, (paddr_t)address, length,
                                   PCIIO_DMA_DATA | DMATRANS64 | PCIIO_BYTE_STREAM
-/*#if defined(IP30) || defined(IP35)
+#if defined(IP30) || defined(IP35)
                                   | ((flags & NF_WRITE) ? PCIIO_NOPREFETCH : PCIBR_BARRIER)
-#endif*/
+#endif
                                 );
 
     if (!address) {
@@ -598,7 +598,7 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
 {
     scsi_request_t *req = ps->req;
     ps->alenlist = NULL;
-    ps->need_unlock = 0;
+    ps->alenlist_type = NVME_ALENLIST_SUPPLIED;
 
     if (req->sr_buffer == NULL && !(req->sr_flags & (SRF_ALENLIST | SRF_MAPBP))) {
         cmn_err(CE_WARN, "nvme_prepare_alenlist: NULL buffer with flags:0x%x buflen:%u buffer:%p", req->sr_flags, req->sr_buflen, req->sr_buffer);
@@ -628,15 +628,31 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
 #ifdef NVME_DBG
         cmn_err(CE_NOTE, "nvme_prepare_alenlist: using user alenlist from bp->b_private");
 #endif
-        /* Don't lock/unlock - we don't own this alenlist */
+        ps->alenlist_type = NVME_ALENLIST_SUPPLIED;
     } else {
         /*
-         * For MAPBP/MAP/MAPUSER: use pre-allocated alenlist (avoids dynamic allocation failures)
-         * Lock it to prevent concurrent use, following ql.c pattern
+         * For MAPBP/MAP/MAPUSER: Choose allocation strategy based on request size
+         * Small requests: Use dynamic alenlist (no lock contention)
+         * Large requests: Use shared pre-allocated alenlist (needs lock)
          */
-        mutex_lock(&soft->alenlist_lock, PZERO);
-        ps->need_unlock = 1;
-        ps->alenlist = soft->alenlist;
+  
+        if (req->sr_buflen < NVME_ALENLIST_SMALL_PAGES * NBPP) {
+            /* Small request - allocate dedicated alenlist to avoid lock contention */
+            ps->alenlist = alenlist_create(0);
+            if (ps->alenlist) {
+                ps->alenlist_type = NVME_ALENLIST_DYNAMIC;
+            } else {
+                /* Allocation failed - fall back to shared alenlist */
+                mutex_lock(&soft->alenlist_lock, PZERO);
+                ps->alenlist = soft->alenlist;
+                ps->alenlist_type = NVME_ALENLIST_SHARED;
+            }
+        } else {
+            /* Large request - use shared pre-allocated alenlist with lock */
+            mutex_lock(&soft->alenlist_lock, PZERO);
+            ps->alenlist = soft->alenlist;
+            ps->alenlist_type = NVME_ALENLIST_SHARED;
+        }
 
         if (req->sr_flags & SRF_MAPBP) {
             /*
@@ -644,7 +660,7 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
              */
             if (BP_ISMAPPED(((buf_t *)(req->sr_bp)))) {
                 cmn_err(CE_WARN, "nvme_prepare_alenlist: SRF_MAPBP but buffer is already mapped");
-                mutex_unlock(&soft->alenlist_lock);
+                nvme_cleanup_alenlist(soft, ps);
                 return 0;
             }
 
@@ -667,7 +683,7 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
             /* Convert buf_t to alenlist (buf_to_alenlist clears the alenlist first) */
             if (buf_to_alenlist(ps->alenlist, (buf_t *)(req->sr_bp), AL_NOCOMPACT) == NULL) {
                 cmn_err(CE_WARN, "nvme_prepare_alenlist: buf_to_alenlist failed");
-                mutex_unlock(&soft->alenlist_lock);
+                nvme_cleanup_alenlist(soft, ps);
                 return 0;
             }
 
@@ -689,9 +705,8 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
                 cmn_err(CE_WARN, "nvme_prepare_alenlist: buffer not dword-aligned (addr=0x%lx)",
                         (__psunsigned_t)req->sr_buffer);
 #endif
-                mutex_unlock(&soft->alenlist_lock);
+                nvme_cleanup_alenlist(soft, ps);
                 nvme_set_adapter_status(req, SC_ALIGN, ST_GOOD);
-                
                 return -1;
             }
             if ((req->sr_buflen & 0x3) != 0) {
@@ -699,7 +714,7 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
                 cmn_err(CE_WARN, "nvme_prepare_alenlist: length not dword-aligned (len=%u)",
                         req->sr_buflen);
 #endif
-                mutex_unlock(&soft->alenlist_lock);
+                nvme_cleanup_alenlist(soft, ps);
                 nvme_set_adapter_status(req, SC_ALIGN, ST_GOOD);
                 return -1;
             }
@@ -722,22 +737,22 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
 
             /* Convert to alenlist based on address type */
             if (is_user_addr) {
-                /* User virtual address - use uvaddr_to_alenlist with pre-allocated alenlist */
+                /* User virtual address - use uvaddr_to_alenlist */
                 if (uvaddr_to_alenlist(ps->alenlist, (uvaddr_t)req->sr_buffer,
                                        req->sr_buflen, 0) == NULL) {
                     cmn_err(CE_WARN, "nvme_prepare_alenlist: uvaddr_to_alenlist failed");
-                    mutex_unlock(&soft->alenlist_lock);
+                    nvme_cleanup_alenlist(soft, ps);
                     return 0;
                 }
 #ifdef NVME_DBG
                 cmn_err(CE_NOTE, "nvme_prepare_alenlist: converted uvaddr to alenlist (KUSEG)");
 #endif
             } else {
-                /* Kernel virtual address - use kvaddr_to_alenlist with pre-allocated alenlist */
+                /* Kernel virtual address - use kvaddr_to_alenlist */
                 if (kvaddr_to_alenlist(ps->alenlist, (caddr_t)req->sr_buffer,
                                        req->sr_buflen, AL_NOCOMPACT) == NULL) {
                     cmn_err(CE_WARN, "nvme_prepare_alenlist: kvaddr_to_alenlist failed");
-                    mutex_unlock(&soft->alenlist_lock);
+                    nvme_cleanup_alenlist(soft, ps);
                     return 0;
                 }
 #ifdef NVME_DBG
@@ -751,7 +766,7 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
              */
             cmn_err(CE_WARN, "nvme_prepare_alenlist: no valid buffer mapping flag set (sr_flags=0x%x)",
                     req->sr_flags);
-            mutex_unlock(&soft->alenlist_lock);
+            nvme_cleanup_alenlist(soft, ps);
             return 0;
         }
     }
@@ -765,20 +780,22 @@ nvme_prepare_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
 }
 
 /*
- * nvme_cleanup_alenlist: Clean up alenlist resources
+ * nvme_cleanup_alenlist: Cleanup alenlist based on allocation type
  *
- * Unlocks the alenlist lock if it was locked during nvme_prepare_alenlist().
- *
- * Arguments:
- *   soft        - Controller state
- *   need_unlock - If 1, unlock soft->alenlist_lock
+ * Handles cleanup for different alenlist types:
+ * - SUPPLIED: No cleanup needed (owned by caller)
+ * - SHARED: Unlock the shared alenlist mutex
+ * - DYNAMIC: Destroy the dynamically allocated alenlist
  */
 void
-nvme_cleanup_alenlist(nvme_soft_t *soft, int need_unlock)
+nvme_cleanup_alenlist(nvme_soft_t *soft, nvme_rwcmd_state_t *ps)
 {
-    if (need_unlock) {
+    if (ps->alenlist_type == NVME_ALENLIST_SHARED) {
         mutex_unlock(&soft->alenlist_lock);
+    } else if (ps->alenlist_type == NVME_ALENLIST_DYNAMIC) {
+        alenlist_destroy(ps->alenlist);
     }
+    /* NVME_ALENLIST_SUPPLIED requires no cleanup */
 }
 
 /*
@@ -986,8 +1003,9 @@ nvme_prp_pool_init(nvme_soft_t *soft)
 {
     int pages;
 
-    /* Allocate pool memory (32 pages = 128KB) */
-    pages = NVME_PRP_POOL_SIZE * (NBPP / soft->nvme_page_size);
+    /* Allocate pool memory (64 pages = 256KB) */
+    pages = (int)btop(NVME_PRP_POOL_SIZE * soft->nvme_page_size); 
+    
 #ifdef NVME_DBG
     cmn_err(CE_NOTE, "nvme_prp_pool_init: allocating PRP pool (%d pages, %d bytes)",
             pages, pages * NBPP);
@@ -1052,7 +1070,7 @@ nvme_prp_pool_done(nvme_soft_t *soft)
     mutex_destroy(&soft->prp_pool_lock);
 
     /* Free the pool memory */
-    kvpfree(soft->prp_pool, NVME_PRP_POOL_SIZE);
+    kvpfree(soft->prp_pool, (int)btop(NVME_PRP_POOL_SIZE * soft->nvme_page_size));
     soft->prp_pool = NULL;
     soft->prp_pool_phys = 0;
     soft->prp_pool_bitmap = 0;
