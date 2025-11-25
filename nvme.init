@@ -2,7 +2,7 @@
 #
 # NVMe Driver Init Script
 #
-# chkconfig: 2 20 80
+# chkconfig: 2 05 80
 # description: Load NVMe driver for NVMe SSD support
 #
 # This script loads the NVMe driver module at boot time
@@ -48,7 +48,7 @@ case "$1" in
                 /sbin/mkparts
                 $ECHO "Device nodes created"
             else
-                echo "WARNING: /sbin/mkparts not found, device nodes not created"
+                echo "WARNING: mkparts not found, device nodes not created"
             fi
         else
             echo "ERROR: Failed to load NVMe driver"

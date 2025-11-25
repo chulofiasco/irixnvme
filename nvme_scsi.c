@@ -942,7 +942,7 @@ nvme_init_scsi_target_info(nvme_soft_t *soft)
 
     /* Set capability flags */
     soft->tinfo.si_ha_status = SRH_TAGQ | SRH_QERR0 | SRH_ALENLIST | SRH_MAPUSER | SRH_WIDE;
-    soft->tinfo.si_maxq = 32;  /* Max queue depth */
+    soft->tinfo.si_maxq = 64;  /* Max queue depth */
     soft->tinfo.si_qdepth = 0;
     soft->tinfo.si_qlimit = 0;
 }
@@ -1070,13 +1070,11 @@ nvme_scsi_ioctl(vertex_hdl_t ctlr_vhdl, unsigned int cmd, struct scsi_ha_op *op)
         return 0;
 
     case SOP_QUIESCE_STATE: {
-        int state;
 #ifdef NVME_DBG
         cmn_err(CE_NOTE, "nvme_scsi_ioctl: SOP_QUIESCE_STATE");        
 #endif
         /* Return current quiesce state */
-        state = soft->quiesce_state;
-        copyout(&state, (void *)op->sb_addr, sizeof(int));
+        *(int*)op->sb_addr = soft->quiesce_state;
         return 0;
     }
     case SOP_GET_SCSI_PARMS:
@@ -1119,8 +1117,27 @@ nvme_scsi_ioctl(vertex_hdl_t ctlr_vhdl, unsigned int cmd, struct scsi_ha_op *op)
         copyout(&sp, (void *)op->sb_addr, sizeof(struct scsi_parms));
         return 0;
     }
+    
+    /* SCSI_IOCTL_GETBUSYTARGETS - report which SCSI targets are busy */
+    case 0x731a:  /* SCSI_IOCTL_GETBUSYTARGETS */
+#ifdef NVME_DBG
+        cmn_err(CE_NOTE, "nvme_scsi_ioctl: SCSI_IOCTL_GETBUSYTARGETS (0x731a)");
+#endif
+        /* NVMe doesn't have the concept of busy targets on a SCSI bus.
+         * Return 0 = no targets busy */
+        *(int*)op->sb_addr = 0;
+        return 0;
+    
+    case 0x731b:  /* SCSI_IOCTL_GETRESID */
+#ifdef NVME_DBG
+        cmn_err(CE_NOTE, "nvme_scsi_ioctl: SCSI_IOCTL_GETRESID (0x731b)");
+#endif
+        /* NVMe completes whole command - no residual data */
+        *(int*)op->sb_addr = 0;
+        return 0;
+    
     default:
-        cmn_err(CE_WARN, "nvme_scsi_ioctl: unknown ioctl 0x%x", cmd);
+        cmn_err(CE_WARN, "nvme_scsi_ioctl: unknown ioctl 0x%x (decimal %d)", cmd, cmd);
         return EINVAL;
     }
 }
