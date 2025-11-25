@@ -177,7 +177,8 @@ nvme_scsi_inquiry(nvme_soft_t *soft, scsi_request_t *req)
             buffer[4] = 0x00;  /* Page 0x00 (this page) */
             buffer[5] = 0x80;  /* Page 0x80 (Unit Serial Number) */
             buffer[6] = 0xB0;  /* Page 0xB0 (Block Limits) */
-            copy_len = 7;
+            buffer[7] = 0xC0;  /* Page 0xC0 (Debug Status - vendor specific) */
+            copy_len = 8;
         } else if (page_code == 0x80) {
             /* Unit Serial Number Page */
             /* Find actual serial number length (trim trailing spaces) */
@@ -224,6 +225,36 @@ nvme_scsi_inquiry(nvme_soft_t *soft, scsi_request_t *req)
 
             /* All other fields remain zero (bzero above) */
             copy_len = 64;
+        } else if (page_code == 0xC0) {
+            /* Vendor-Specific Debug Status Page */
+            /* This triggers debug output to syslog and returns minimal data */
+            uint_t csts;
+            
+            cmn_err(CE_WARN, "nvme: outstanding reqs: %d,%d", 
+                    soft->admin_queue.outstanding, soft->io_queue.outstanding);
+            csts = NVME_RD(soft, NVME_REG_CSTS);
+            cmn_err(CE_WARN, "CSTS (0x1C): 0x%x", csts);
+            cmn_err(CE_CONT, "  RDY (Ready):                 %u %s",
+                    csts & 1, (csts & 1) ? "[READY]" : "[NOT READY]");
+            cmn_err(CE_CONT, "  CFS (Controller Fatal):      %u %s",
+                    (csts >> 1) & 1, ((csts >> 1) & 1) ? "[FATAL ERROR!]" : "[OK]");
+            cmn_err(CE_CONT, "  SHST (Shutdown Status):      %u", (csts >> 2) & 3);
+            cmn_err(CE_CONT, "  NSSRO (NVM Subsys Reset):    %u", (csts >> 4) & 1);
+            
+            /* Return minimal VPD page */
+            if (req->sr_buflen < 8) {
+                nvme_set_adapter_error(req);
+                return -1;
+            }
+            buffer[0] = 0x00;  /* Peripheral Device Type */
+            buffer[1] = 0xC0;  /* Page Code: Debug Status */
+            buffer[2] = 0x00;  /* Reserved */
+            buffer[3] = 0x04;  /* Page Length */
+            buffer[4] = (csts >> 24) & 0xFF;
+            buffer[5] = (csts >> 16) & 0xFF;
+            buffer[6] = (csts >> 8) & 0xFF;
+            buffer[7] = csts & 0xFF;
+            copy_len = 8;
         } else {
             /* Unsupported VPD page */
             cmn_err(CE_WARN, "nvme_scsi_inquiry: unsupported VPD page 0x%x", page_code);
@@ -244,18 +275,6 @@ nvme_scsi_inquiry(nvme_soft_t *soft, scsi_request_t *req)
         }
 
         bcopy(inquiry_data, buffer, copy_len);
-        {
-            uint_t csts;
-            cmn_err(CE_WARN, "nvme: outstanding reqs: %d,%d", soft->admin_queue.outstanding, soft->io_queue.outstanding);
-            csts = NVME_RD(soft, NVME_REG_CSTS);
-            cmn_err(CE_WARN, "CSTS (0x1C): 0x%08x", csts);
-            cmn_err(CE_CONT, "  RDY (Ready):                 %u %s",
-                    csts & 1, (csts & 1) ? "[READY]" : "[NOT READY]");
-            cmn_err(CE_CONT, "  CFS (Controller Fatal):      %u %s",
-                    (csts >> 1) & 1, ((csts >> 1) & 1) ? "[FATAL ERROR!]" : "[OK]");
-            cmn_err(CE_CONT, "  SHST (Shutdown Status):      %u", (csts >> 2) & 3);
-            cmn_err(CE_CONT, "  NSSRO (NVM Subsys Reset):    %u", (csts >> 4) & 1);
-        }
     }
 
     nvme_set_success(req);

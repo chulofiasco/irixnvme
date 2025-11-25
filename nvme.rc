@@ -1,0 +1,73 @@
+#!/sbin/sh
+#
+# NVMe - Load NVMe driver and create device nodes
+#
+# This script is called by the init system at boot time
+# to load the NVMe driver and create device nodes.
+#
+# $Revision: 1.0 $
+
+if chkconfig verbose
+then
+    LOGGER='/sbin/lfmt -s info'
+else
+    LOGGER='/sbin/lfmt -s info -G 1'
+fi
+
+NOMSGSEVERITY=1 export NOMSGSEVERITY
+
+IS_ON=/etc/chkconfig
+MODULE=/var/sysgen/boot/nvme.o
+PREFIX=nvme_
+
+case $1 in
+        'start')
+            if $IS_ON nvme ; then
+                # Check if module file exists
+                if [ ! -f $MODULE ]; then
+                    $LOGGER "NVMe: Module not found: $MODULE\n"
+                    exit 1
+                fi
+
+                # Check if already loaded
+                if /sbin/ml list | grep -q "prefix ${PREFIX}"; then
+                    $LOGGER "NVMe: Driver already loaded\n"
+                    exit 0
+                fi
+
+                # Load the driver
+                $LOGGER "NVMe: Loading driver...\n"
+                if /sbin/ml ld -v -c $MODULE -p $PREFIX -s -1 -t 0 ; then
+                    $LOGGER "NVMe: Driver loaded successfully\n"
+                    
+                    # Run mkparts to create device nodes
+                    if [ -x /usr/sbin/mkparts ]; then
+                        /usr/sbin/mkparts
+                        $LOGGER "NVMe: Device nodes created\n"
+                    fi
+                else
+                    $LOGGER "NVMe: Failed to load driver\n"
+                    exit 1
+                fi
+            fi
+        ;;
+        'stop')
+            # Check if driver is loaded
+            if /sbin/ml list | grep -q "prefix ${PREFIX}"; then
+                $LOGGER "NVMe: Unloading driver...\n"
+                # Get module ID and unload
+                for id in `/sbin/ml list | grep "prefix ${PREFIX}" | sed 's/Id: *\([0-9]*\).*/\1/'`; do
+                    if /sbin/ml unld -v $id ; then
+                        $LOGGER "NVMe: Driver unloaded\n"
+                    else
+                        $LOGGER "NVMe: Failed to unload driver (may be in use)\n"
+                    fi
+                done
+            fi
+        ;;
+        'restart')
+            $LOGGER "NVMe: Restarting driver...\n"
+            $0 stop
+            $0 start
+        ;;
+esac

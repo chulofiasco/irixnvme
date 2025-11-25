@@ -55,6 +55,30 @@ NVMETEST = nvmetest
 
 # Default target
 all: $(MODULE)
+	@echo ""
+	@echo "=========================================="
+	@echo "NVMe Driver Build Complete!"
+	@echo "=========================================="
+	@echo ""
+	@echo "Module: $(MODULE)"
+	@echo "Platform: $(CPUBOARD)"
+	@echo ""
+	@echo "Next Steps - Choose ONE option:"
+	@echo ""
+	@echo "OPTION 1: Loadable Module (Dynamic)"
+	@echo "  - For testing and development"
+	@echo "  - Load/unload without rebooting"
+	@echo "  - Run: make load    (load driver now)"
+	@echo "  - Run: make unload  (unload driver)"
+	@echo ""
+	@echo "OPTION 2: Static Kernel (Permanent Install)"
+	@echo "  - Auto-loads at every boot"
+	@echo "  - Registers with kernel configuration"
+	@echo "  - Run: make install"
+	@echo "  - Then reboot system"
+	@echo ""
+	@echo "=========================================="
+	@echo ""
 
 # Link all object files into a single loadable module
 # Use ld with -r flag to create relocatable object (kernel module)
@@ -126,7 +150,7 @@ nvmetest:
 	@rm -f nvmetest
 	@CTLR=$${CTLR:-3}; \
 	echo "Building for controller $$CTLR"; \
-	cc -DCTLR_NUM=$$CTLR -o nvmetest nvmetest.c; \
+	cc -woff 3970 -DCTLR_NUM=$$CTLR -o nvmetest nvmetest.c; \
 	chmod +x nvmetest
 
 # Build test utility
@@ -197,47 +221,109 @@ list:
 clean:
 	rm -f $(OBJS) $(MODULE) $(MKPARTS) $(NVMETEST)
 
-# Install target - Install driver permanently into the kernel
+# Install target - Install driver permanently into the kernel with auto-registration
 # This copies the module to /var/sysgen/boot/ and updates the system configuration
-# After running this, the driver will load automatically at boot
+# The 'R' flag in nvme.master enables automatic registration at boot
 install: $(MODULE)
-	@echo "Installing NVMe driver permanently..."
+	@echo "Installing NVMe driver with auto-registration..."
 	@if [ ! -d /var/sysgen/boot ]; then \
 		echo "ERROR: /var/sysgen/boot directory not found"; \
 		exit 1; \
 	fi
+	@echo "Backing up current kernel..."
+	@if [ -f /unix ]; then \
+		BACKUP=/unix.nvme.bak; \
+		if [ -f $$BACKUP ]; then \
+			COUNT=0; \
+			while [ -f $$BACKUP.$$COUNT ]; do \
+				COUNT=`expr $$COUNT + 1`; \
+			done; \
+			cp /unix $$BACKUP.$$COUNT; \
+			echo "Kernel backed up to $$BACKUP.$$COUNT"; \
+		else \
+			cp /unix $$BACKUP; \
+			echo "Kernel backed up to $$BACKUP"; \
+		fi; \
+	fi
 	cp $(MODULE) /var/sysgen/boot/nvme.o
-	@echo "Creating /var/sysgen/master.d/nvme configuration..."
-	@echo "*" > /var/sysgen/master.d/nvme
-	@echo "* NVMe Driver Configuration" >> /var/sysgen/master.d/nvme
-	@echo "*" >> /var/sysgen/master.d/nvme
-	@echo "* This file tells lboot to include the NVMe driver in the kernel" >> /var/sysgen/master.d/nvme
-	@echo "*" >> /var/sysgen/master.d/nvme
-	@echo "+thread" >> /var/sysgen/master.d/nvme
-	@echo "" >> /var/sysgen/master.d/nvme
-	@echo "\$$\$$\$$" >> /var/sysgen/master.d/nvme
-	@echo "nvme_" >> /var/sysgen/master.d/nvme
-	@echo "" >> /var/sysgen/master.d/nvme
+	@echo "Installing master.d configuration..."
+	cp nvme.master /var/sysgen/master.d/nvme
+	@echo "Installing system configuration..."
+	cp nvme.sm /var/sysgen/system/nvme.sm
+	@echo "Installing init script..."
+	cp nvme.init /etc/init.d/nvme
+	chmod 755 /etc/init.d/nvme
+	@echo "Installing rc.d startup script..."
+	cp nvme.rc /etc/rc2.d/S20nvme
+	chmod 755 /etc/rc2.d/S20nvme
+	@echo "Configuring chkconfig for auto-load at boot..."
+	/sbin/chkconfig -f nvme on
+	@echo "Installing utilities to /usr/sbin..."
+	@if [ ! -f $(MKPARTS) ]; then \
+		echo "Building mkparts..."; \
+		$(MAKE) mkparts; \
+	fi
+	cp $(MKPARTS) /usr/sbin/mkparts
+	chmod 755 /usr/sbin/mkparts
+	@if [ ! -f $(NVMETEST) ]; then \
+		echo "Building nvmetest..."; \
+		$(MAKE) nvmetest; \
+	fi
+	cp $(NVMETEST) /usr/sbin/nvmetest
+	chmod 755 /usr/sbin/nvmetest
+	@echo "Creating symlinks in /usr/bin..."
+	@ln -sf /usr/sbin/mkparts /usr/bin/mkparts
+	@ln -sf /usr/sbin/nvmetest /usr/bin/nvmetest
+	@chmod 755 /usr/bin/mkparts /usr/bin/nvmetest
+	@echo "Installing man pages..."
+	@mkdir -p /usr/share/catman/local/cat1
+	@mkdir -p /usr/share/catman/local/cat7
+	@if [ -f mkparts.1 ]; then \
+		cp mkparts.1 /usr/share/catman/local/cat1/mkparts.1; \
+	fi
+	@if [ -f nvmetest.1 ]; then \
+		cp nvmetest.1 /usr/share/catman/local/cat1/nvmetest.1; \
+	fi
+	@if [ -f nvme.7 ]; then \
+		cp nvme.7 /usr/share/catman/local/cat7/nvme.7; \
+	fi
 	@echo ""
 	@echo "Driver installed to /var/sysgen/boot/nvme.o"
-	@echo "Configuration file created: /var/sysgen/master.d/nvme"
+	@echo "Configuration files installed:"
+	@echo "  /var/sysgen/master.d/nvme (with R flag for autoregister)"
+	@echo "  /var/sysgen/system/nvme.sm (USE: nvme)"
+	@echo "  /etc/init.d/nvme (init script)"
+	@echo "  /etc/rc2.d/S20nvme (startup script)"
+	@echo "Utilities installed:"
+	@echo "  /usr/sbin/mkparts (create device nodes)"
+	@echo "  /usr/sbin/nvmetest (NVMe test utility)"
+	@echo "  /usr/bin/mkparts -> /usr/sbin/mkparts (symlink)"
+	@echo "  /usr/bin/nvmetest -> /usr/sbin/nvmetest (symlink)"
 	@echo ""
-	@echo "Next steps:"
-	@echo "  1. Run: autoconfig"
-	@echo "  2. Reboot the system"
-	@echo "  3. Load manually after boot: ml ld -v -c /var/sysgen/boot/nvme.o -p nvme_ -s -1 -t 0"
+	@echo "Running autoconfig to rebuild kernel configuration..."
+	@/etc/autoconfig
 	@echo ""
-	@echo "Note: Loadable modules are not auto-loaded at boot by default."
-	@echo "To load automatically, add to /etc/init.d/network or create a startup script."
+	@echo "Installation complete!"
 	@echo ""
-	@echo "To verify after reboot:"
+	@echo "To verify:"
+	@echo "  ml list  (should show nvme_ loaded)"
 	@echo "  hinv | grep -i scsi"
 	@echo "  ls -l /dev/dsk/dks*"
+	@echo ""
+	@echo "To restore kernel backup if needed:"
+	@echo "  cp /unix.nvme.bak /unix"
 	@echo ""
 
 # Uninstall target - Remove permanently installed driver
 uninstall:
 	@echo "Uninstalling NVMe driver..."
+	@echo "Checking if driver is loaded..."
+	@if /sbin/ml list | grep -q "prefix nvme_"; then \
+		echo "Unloading driver first..."; \
+		for id in `/sbin/ml list | grep 'prefix nvme_' | sed 's/Id: *\([0-9]*\).*/\1/'`; do \
+			/sbin/ml unld -v $$id; \
+		done; \
+	fi
 	@if [ -f /var/sysgen/boot/nvme.o ]; then \
 		rm -f /var/sysgen/boot/nvme.o; \
 		echo "Removed /var/sysgen/boot/nvme.o"; \
@@ -248,7 +334,55 @@ uninstall:
 		rm -f /var/sysgen/master.d/nvme; \
 		echo "Removed /var/sysgen/master.d/nvme"; \
 	fi
-	@echo "Run 'autoconfig' to update kernel configuration"
+	@if [ -f /var/sysgen/system/nvme.sm ]; then \
+		rm -f /var/sysgen/system/nvme.sm; \
+		echo "Removed /var/sysgen/system/nvme.sm"; \
+	fi
+	@if [ -f /etc/init.d/nvme ]; then \
+		/sbin/chkconfig nvme off; \
+		rm -f /etc/init.d/nvme; \
+		rm -f /etc/rc0.d/K80nvme /etc/rc2.d/S20nvme; \
+		echo "Removed /etc/init.d/nvme and rc.d entries"; \
+	fi
+	@if [ -f /usr/sbin/mkparts ]; then \
+		rm -f /usr/sbin/mkparts; \
+		echo "Removed /usr/sbin/mkparts"; \
+	fi
+	@if [ -f /usr/sbin/nvmetest ]; then \
+		rm -f /usr/sbin/nvmetest; \
+		echo "Removed /usr/sbin/nvmetest"; \
+	fi
+	@if [ -L /usr/bin/mkparts ]; then \
+		rm -f /usr/bin/mkparts; \
+		echo "Removed /usr/bin/mkparts symlink"; \
+	fi
+	@if [ -L /usr/bin/nvmetest ]; then \
+		rm -f /usr/bin/nvmetest; \
+		echo "Removed /usr/bin/nvmetest symlink"; \
+	fi
+	@if [ -f /usr/share/catman/local/cat1/mkparts.1 ]; then \
+		rm -f /usr/share/catman/local/cat1/mkparts.1; \
+		echo "Removed mkparts man page"; \
+	fi
+	@if [ -f /usr/share/catman/local/cat1/nvmetest.1 ]; then \
+		rm -f /usr/share/catman/local/cat1/nvmetest.1; \
+		echo "Removed nvmetest man page"; \
+	fi
+	@if [ -f /usr/share/catman/local/cat7/nvme.7 ]; then \
+		rm -f /usr/share/catman/local/cat7/nvme.7; \
+		echo "Removed nvme man page"; \
+	fi
+	@if [ -L /usr/bin/mkparts ]; then \
+		rm -f /usr/bin/mkparts; \
+		echo "Removed /usr/bin/mkparts symlink"; \
+	fi
+	@if [ -L /usr/bin/nvmetest ]; then \
+		rm -f /usr/bin/nvmetest; \
+		echo "Removed /usr/bin/nvmetest symlink"; \
+	fi
+	@echo "Running autoconfig to update kernel configuration..."
+	@/etc/autoconfig
+	@echo "Uninstall complete."
 
 reboot:
 	shutdown -y -g0 -i6

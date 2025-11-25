@@ -1,0 +1,140 @@
+.TH MKPARTS 1M "November 2025" "IRIX NVMe Driver"
+.SH NAME
+mkparts \- create NVMe device partition nodes
+.sp
+.SH SYNOPSIS
+.B mkparts
+[\fICONTROLLER\fR]
+.sp
+.SH DESCRIPTION
+.B mkparts
+reads the volume header from an NVMe device and displays
+partition information. The kernel driver automatically
+creates partition device nodes when the volume header is
+read via DIOCREADVOLHDR ioctl.
+.sp
+When run without arguments,
+.B mkparts
+auto-detects the NVMe controller by scanning
+/hw/scsi_ctlr/0-15/target/0/lun/0/disk and looking for
+controllers with "NVMe" vendor ID.
+.sp
+When a controller number is explicitly specified,
+.B mkparts
+first removes any existing partition nodes for that controller
+before creating new ones. This ensures a clean state.
+.sp
+.SH ARGUMENTS
+.I CONTROLLER
+.br
+SCSI controller number (0-15). If not specified, auto-detection
+is used.
+.sp
+.SH OPERATION
+.B mkparts
+performs the following steps:
+.sp
+1. If a controller is specified, removes old partition nodes
+.br
+   in /dev/dsk and /dev/rdsk
+.sp
+2. Locates the NVMe controller
+.sp
+3. Opens the volume header device /dev/rdsk/dksXd0vol
+.sp
+4. Reads the volume header using DIOCREADVOLHDR ioctl
+.sp
+5. The kernel driver automatically creates partition devices:
+.br
+   /dev/dsk/dksXd0sN and /dev/rdsk/dksXd0sN
+.br
+   (where X is controller, N is partition 0-15)
+.sp
+.SH EXAMPLES
+.B Auto-detect controller and create partitions:
+.sp
+.nf
+mkparts
+.fi
+.sp
+.B Create partitions for controller 3:
+.sp
+.nf
+mkparts 3
+.fi
+.sp
+.B Recreate partitions after repartitioning disk:
+.sp
+.nf
+mkparts 3
+.fi
+.sp
+.SH FILES
+.nf
+/hw/scsi_ctlr/N/target/0/lun/0/disk  - Hardware graph nodes
+/dev/dsk/dksXd0sN                    - Block device nodes
+/dev/rdsk/dksXd0sN                   - Character device nodes
+/dev/rdsk/dksXd0vol                  - Volume header device
+.fi
+.sp
+.SH DIAGNOSTICS
+.B ERROR: Failed to open disk device
+.br
+Cannot access the NVMe disk device. Ensure the driver is
+loaded.
+.sp
+.B ERROR: Cannot read volume header
+.br
+Failed to read the first block containing the volume header.
+The device may not be formatted or initialized.
+.sp
+.B ERROR: Invalid volume header magic
+.br
+Volume header does not contain expected magic number
+(0xBE5A941). The disk may need to be initialized with fx(1M).
+.sp
+.B Auto-detecting NVMe controller...
+.br
+Scanning for NVMe devices when no controller specified.
+.sp
+.B Cleaning up old partition nodes for controller N
+.br
+Removing existing partition nodes before creating new ones.
+This only happens when a controller number is explicitly
+specified.
+.sp
+.SH "EXIT STATUS"
+.nf
+0  - Success
+1  - Error occurred (see diagnostic messages)
+.fi
+.sp
+.SH "SEE ALSO"
+nvmetest(1M), nvme(7), fx(1M), prtvtoc(1M), dvhtool(1M)
+.sp
+.SH NOTES
+.B mkparts
+must be run as root to access device nodes.
+.sp
+The utility reads the volume header using DIOCREADVOLHDR
+ioctl. The kernel driver automatically creates partition
+device nodes. Some partitions may not appear if the driver
+has restrictions on which partition numbers are supported.
+.sp
+Partition entries in the volume header must have valid first
+block numbers (pt_firstlbn != -1) to be recognized.
+.sp
+When auto-detecting, existing partition nodes are preserved.
+When specifying a controller number, old nodes are cleaned
+up first.
+.sp
+If partition device nodes are missing after running mkparts,
+check /var/adm/SYSLOG for driver error messages.
+.sp
+.SH BUGS
+Auto-detection does not clean up old partition nodes. This
+is intentional to avoid accidentally removing nodes for the
+wrong controller.
+.sp
+.SH AUTHORS
+IRIX NVMe Driver Project

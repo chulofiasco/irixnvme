@@ -63,9 +63,42 @@ int main(int argc, char **argv)
     struct stat st;
 
     if (argc > 2) {
-        fprintf(stderr, "Usage: %s [controller_number]\n", argv[0]);
-        fprintf(stderr, "Example: %s 3\n", argv[0]);
-        fprintf(stderr, "         %s    (auto-detect)\n", argv[0]);
+        fprintf(stderr, "\n");
+        fprintf(stderr, "mkparts - Create NVMe partition device nodes\n");
+        fprintf(stderr, "==========================================\n");
+        fprintf(stderr, "\n");
+        fprintf(stderr, "USAGE:\n");
+        fprintf(stderr, "  mkparts [controller_number]\n");
+        fprintf(stderr, "\n");
+        fprintf(stderr, "DESCRIPTION:\n");
+        fprintf(stderr, "  Creates partition device nodes for NVMe drives by reading the\n");
+        fprintf(stderr, "  volume header and triggering the kernel to create partition\n");
+        fprintf(stderr, "  devices (e.g., /dev/dsk/dks3d0s0, /dev/dsk/dks3d0s1, etc.)\n");
+        fprintf(stderr, "\n");
+        fprintf(stderr, "OPTIONS:\n");
+        fprintf(stderr, "  controller_number  SCSI controller number (0-99)\n");
+        fprintf(stderr, "                     If omitted, auto-detects NVMe controller\n");
+        fprintf(stderr, "\n");
+        fprintf(stderr, "EXAMPLES:\n");
+        fprintf(stderr, "  mkparts           Auto-detect NVMe controller and create partitions\n");
+        fprintf(stderr, "  mkparts 3         Create partitions for controller 3\n");
+        fprintf(stderr, "\n");
+        fprintf(stderr, "REQUIREMENTS:\n");
+        fprintf(stderr, "  - NVMe driver must be loaded (ml list | grep nvme_)\n");
+        fprintf(stderr, "  - Disk must have valid IRIX volume header\n");
+        fprintf(stderr, "  - Must be run as root\n");
+        fprintf(stderr, "\n");
+        fprintf(stderr, "NOTES:\n");
+        fprintf(stderr, "  - Can be run multiple times to refresh partition nodes\n");
+        fprintf(stderr, "  - If repartitioning, unmount all filesystems first\n");
+        fprintf(stderr, "  - After running fx to change partitions, run mkparts again\n");
+        fprintf(stderr, "  - When controller number is specified, old partition nodes\n");
+        fprintf(stderr, "    are automatically cleaned up before recreating them\n");
+        fprintf(stderr, "  - When auto-detecting, old nodes are preserved\n");
+        fprintf(stderr, "\n");
+        fprintf(stderr, "SEE ALSO:\n");
+        fprintf(stderr, "  fx(8), prtvtoc(8), dvhtool(8)\n");
+        fprintf(stderr, "\n");
         return 1;
     }
 
@@ -75,6 +108,24 @@ int main(int argc, char **argv)
         if (ctlr < 0 || ctlr > 99) {
             fprintf(stderr, "Error: Invalid controller number: %d\n", ctlr);
             return 1;
+        }
+        
+        /* Clean up old partition nodes when explicitly specified */
+        printf("Cleaning up old partition nodes for controller %d...\n", ctlr);
+        for (i = 0; i < NPARTAB; i++) {
+            char oldpath[256];
+            
+            /* Remove block device nodes */
+            snprintf(oldpath, sizeof(oldpath), "/dev/dsk/dks%dd0s%d", ctlr, i);
+            if (unlink(oldpath) == 0) {
+                printf("  Removed %s\n", oldpath);
+            }
+            
+            /* Remove raw/character device nodes */
+            snprintf(oldpath, sizeof(oldpath), "/dev/rdsk/dks%dd0s%d", ctlr, i);
+            if (unlink(oldpath) == 0) {
+                printf("  Removed %s\n", oldpath);
+            }
         }
     } else {
         ctlr = find_nvme_controller();

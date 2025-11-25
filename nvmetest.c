@@ -20,6 +20,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/dkio.h>
+#include <inttypes.h>
 #include <dslib.h>
 
 /* IRIX hardware graph path - controller number can be overridden at compile time */
@@ -36,6 +37,13 @@
 #define DEFAULT_SCSI_PATH "/hw/scsi_ctlr/" TOSTRING(CTLR_NUM) "/target/0/lun/0/scsi"
 #define BLOCK_SIZE 512
 
+/* Function prototypes */
+char *find_nvme_controller(void);
+int is_nvme_device(const char *scsi_path);
+
+/* Global flag for extended debug output */
+static int g_extended_debug = 0;
+
 /* Test functions */
 void test_inquiry(int fd);
 void test_read_capacity(int fd);
@@ -50,11 +58,15 @@ void dump_hex(unsigned char *data, size_t len, size_t offset);
 /* Random number generator state (simple LCG) */
 static unsigned int rng_seed = 0;
 
+/* Quiet mode for auto-detection (suppress error messages) */
+static int quiet_mode = 0;
+
 void usage(const char *progname)
 {
     fprintf(stderr, "Usage: %s [options]\n", progname);
     fprintf(stderr, "Options:\n");
-    fprintf(stderr, "  -d PATH        Device path (default: %s)\n", DEFAULT_SCSI_PATH);
+    fprintf(stderr, "  -d PATH        Device path (default: auto-detect)\n");
+    fprintf(stderr, "  -x             Enable extended debug output\n");
     fprintf(stderr, "  -i             Test INQUIRY\n");
     fprintf(stderr, "  -c             Test READ CAPACITY\n");
     fprintf(stderr, "  -r LBA         Read single block at LBA\n");
@@ -67,10 +79,93 @@ void usage(const char *progname)
     fprintf(stderr, "  -h             Show this help\n");
     fprintf(stderr, "\nExamples:\n");
     fprintf(stderr, "  %s -a                           # Run all basic tests\n", progname);
+    fprintf(stderr, "  %s -x -i                        # INQUIRY with extended debug\n", progname);
     fprintf(stderr, "  %s -s 0 8192                    # Large read (4MB, tests PRP chaining)\n", progname);
     fprintf(stderr, "  %s -R 1000                      # Random write/read stress test\n", progname);
     fprintf(stderr, "  %s -d /hw/scsi_ctlr/1/... -i   # Test different controller\n", progname);
     exit(1);
+}
+
+/* Check if a SCSI device path is an NVMe device by sending INQUIRY */
+int is_nvme_device(const char *scsi_path)
+{
+    int fd;
+    unsigned char inq_data[36];
+    dsreq_t req;
+    unsigned char cdb[6];
+    int result = 0;
+    int saved_stderr = -1;
+    struct stat st;
+
+    /* First check if the path exists and is accessible via stat()
+     * This avoids triggering kernel panics from stale hwgraph entries
+     * that might still be present after hardware changes */
+    if (stat(scsi_path, &st) != 0) {
+        return 0;  /* Path doesn't exist or is inaccessible */
+    }
+
+    /* Redirect stderr to /dev/null if in quiet mode to suppress driver messages */
+    if (quiet_mode) {
+        saved_stderr = dup(2);
+        close(2);
+        open("/dev/null", O_WRONLY);
+    }
+
+    fd = open(scsi_path, O_RDONLY | O_NONBLOCK);
+    
+    /* Restore stderr */
+    if (quiet_mode && saved_stderr >= 0) {
+        dup2(saved_stderr, 2);
+        close(saved_stderr);
+    }
+    
+    if (fd < 0) {
+        return 0;  /* Can't open, not a valid device */
+    }
+
+    /* Send INQUIRY command */
+    cdb[0] = 0x12; cdb[1] = 0; cdb[2] = 0; cdb[3] = 0; cdb[4] = 36; cdb[5] = 0;
+
+    bzero(&req, sizeof(req));
+    req.ds_flags = DSRQ_READ | DSRQ_SENSE;
+    req.ds_time = 1000;  /* 1 second timeout */
+    req.ds_cmdbuf = (caddr_t)cdb;
+    req.ds_cmdlen = 6;
+    req.ds_databuf = (caddr_t)inq_data;
+    req.ds_datalen = 36;
+    bzero(inq_data, 36);
+
+    if (ioctl(fd, DS_ENTER, &req) == 0 && req.ds_status == 0) {
+        /* Check if vendor starts with "NVMe" */
+        if (strncmp((char *)&inq_data[8], "NVMe", 4) == 0) {
+            result = 1;
+        }
+    }
+
+    close(fd);
+    return result;
+}
+
+/* Find the first NVMe controller by scanning /hw/scsi_ctlr/ */
+char *find_nvme_controller(void)
+{
+    static char path[256];
+    char test_path[256];
+    int ctlr_num;
+
+    /* Scan controller numbers 0-15 */
+    for (ctlr_num = 0; ctlr_num < 16; ctlr_num++) {
+        snprintf(test_path, sizeof(test_path), 
+                 "/hw/scsi_ctlr/%d/target/0/lun/0/scsi", ctlr_num);
+        
+        /* Check if this is an NVMe device */
+        if (is_nvme_device(test_path)) {
+            snprintf(path, sizeof(path), "%s", test_path);
+            return path;
+        }
+    }
+
+    return NULL;  /* No NVMe controller found */
 }
 
 int main(int argc, char *argv[])
@@ -78,6 +173,7 @@ int main(int argc, char *argv[])
     int fd;
     int opt;
     int test_all = 0;
+    int extended_debug = 0;
     int test_inquiry_flag = 0;
     int test_capacity_flag = 0;
     int test_read_flag = 0;
@@ -92,7 +188,8 @@ int main(int argc, char *argv[])
     unsigned int count = 1;
     unsigned int count_write = 1;
     unsigned int random_iterations = 100;
-    const char *device_path = DEFAULT_SCSI_PATH;
+    const char *device_path = NULL;
+    char *auto_path;
 
     if (argc < 2) {
         usage(argv[0]);
@@ -102,10 +199,13 @@ int main(int argc, char *argv[])
     rng_seed = (unsigned int)time(NULL);
 
     /* Parse options */
-    while ((opt = getopt(argc, argv, "d:icr:s:W:S:w:R:ah")) != -1) {
+    while ((opt = getopt(argc, argv, "d:xicr:s:W:S:w:R:ah")) != -1) {
         switch (opt) {
         case 'd':
             device_path = optarg;
+            break;
+        case 'x':
+            extended_debug = 1;
             break;
         case 'i':
             test_inquiry_flag = 1;
@@ -155,15 +255,48 @@ int main(int argc, char *argv[])
         }
     }
 
+    /* Set global extended debug flag */
+    g_extended_debug = extended_debug;
+
+    /* Auto-detect NVMe controller if no device path specified */
+    if (device_path == NULL) {
+    printf("Auto-detecting NVMe controller...\n\n\n");
+        quiet_mode = 1;  /* Suppress driver messages during scan */
+        auto_path = find_nvme_controller();
+        quiet_mode = 0;  /* Re-enable messages */
+        if (auto_path) {
+            device_path = auto_path;
+            printf("Found NVMe controller at: %s\n\n\n", device_path);
+        } else {
+            fprintf(stderr, "ERROR: No NVMe controller found\n");
+            fprintf(stderr, "\nTried scanning /hw/scsi_ctlr/0-15/target/0/lun/0/scsi\n");
+            fprintf(stderr, "\nPossible causes:\n");
+            fprintf(stderr, "  1. NVMe driver is not loaded\n");
+            fprintf(stderr, "  2. No NVMe device is present\n");
+            fprintf(stderr, "  3. Device initialization failed\n");
+            fprintf(stderr, "\nTroubleshooting:\n");
+            fprintf(stderr, "  - Check if driver is loaded:  ml list | grep nvme\n");
+            fprintf(stderr, "  - Check available controllers: ls /hw/scsi_ctlr/\n");
+            fprintf(stderr, "  - Load driver: smake load\n");
+            fprintf(stderr, "  - Run full setup: smake setup\n");
+            fprintf(stderr, "  - Specify device manually: %s -d /hw/scsi_ctlr/N/target/0/lun/0/scsi\n", argv[0]);
+            exit(1);
+        }
+    }
+
     /* Check if device exists before trying to open it */
     {
         struct stat st;
         if (stat(device_path, &st) != 0) {
             fprintf(stderr, "ERROR: Device %s does not exist\n", device_path);
-            fprintf(stderr, "\nPossible causes:\n");
-            fprintf(stderr, "  1. NVMe driver is not loaded\n");
-            fprintf(stderr, "  2. Wrong controller number (compiled for controller %d)\n", CTLR_NUM);
-            fprintf(stderr, "  3. Device initialization failed\n");
+            
+            /* Try to find any NVMe controller to help user */
+            auto_path = find_nvme_controller();
+            if (auto_path && strcmp(auto_path, device_path) != 0) {
+                fprintf(stderr, "\nHowever, found NVMe controller at: %s\n", auto_path);
+                fprintf(stderr, "Try running without -d option to use auto-detection\n");
+            }
+            
             fprintf(stderr, "\nTroubleshooting:\n");
             fprintf(stderr, "  - Check if driver is loaded:  ml list | grep nvme\n");
             fprintf(stderr, "  - Check available controllers: ls /hw/scsi_ctlr/\n");
@@ -267,6 +400,53 @@ void test_inquiry(int fd)
     printf("Product:  '%s'\n", product);
     printf("Revision: '%s'\n", revision);
     printf("Device Type: 0x%02x\n", inq_data[0] & 0x1F);
+
+    /* Show extended debug info if requested */
+    if (g_extended_debug) {
+        unsigned char vpd_data[8];
+        unsigned char vpd_cdb[6];
+        dsreq_t vpd_req;
+
+    printf("\n=== Extended Debug Info ===\n");
+        printf("Querying controller status (VPD page 0xC0)...\n");
+        printf("(Check syslog for detailed output)\n");
+        /* Add a newline to separate WARNING output from previous line */
+        printf("\n");
+
+        /* Send INQUIRY for VPD page 0xC0 (vendor-specific debug) */
+        vpd_cdb[0] = 0x12;  /* INQUIRY */
+        vpd_cdb[1] = 0x01;  /* EVPD=1 */
+        vpd_cdb[2] = 0xC0;  /* Page Code: Debug Status */
+        vpd_cdb[3] = 0;
+        vpd_cdb[4] = sizeof(vpd_data);
+        vpd_cdb[5] = 0;
+
+        bzero(&vpd_req, sizeof(vpd_req));
+        vpd_req.ds_flags = DSRQ_READ | DSRQ_SENSE;
+        vpd_req.ds_time = 5000;
+        vpd_req.ds_cmdbuf = (caddr_t)vpd_cdb;
+        vpd_req.ds_cmdlen = 6;
+        vpd_req.ds_databuf = (caddr_t)vpd_data;
+        vpd_req.ds_datalen = sizeof(vpd_data);
+        bzero(vpd_data, sizeof(vpd_data));
+
+        if (ioctl(fd, DS_ENTER, &vpd_req) == 0 && vpd_req.ds_status == 0) {
+            unsigned int csts = (vpd_data[4] << 24) | (vpd_data[5] << 16) | 
+                               (vpd_data[6] << 8) | vpd_data[7];
+            int rdy = csts & 1;
+            int cfs = (csts >> 1) & 1;
+            int shst = (csts >> 2) & 3;
+            int nssro = (csts >> 4) & 1;
+            printf("CSTS Register: 0x%08x\n", csts);
+            printf("  RDY (Ready): %d %s\n", rdy, rdy ? "[READY]" : "[NOT READY]");
+            printf("  CFS (Controller Fatal): %d %s\n", cfs, cfs ? "[FATAL ERROR!]" : "[OK]");
+            printf("  SHST (Shutdown Status): %d\n", shst);
+            printf("  NSSRO (NVM Subsys Reset): %d\n", nssro);
+        } else {
+            printf("Failed to query debug status\n");
+        }
+    }
+
     printf("\n");
 }
 
@@ -729,7 +909,7 @@ static void *alloc_aligned(size_t size, size_t alignment)
     void *ptr;
     void *aligned_ptr;
     size_t total_size;
-    size_t addr;
+    unsigned long addr;
 
     /* Allocate extra space for alignment + pointer storage */
     total_size = size + alignment + sizeof(void *);
@@ -737,7 +917,7 @@ static void *alloc_aligned(size_t size, size_t alignment)
     if (!ptr) return NULL;
 
     /* Align the pointer */
-    addr = (size_t)ptr + sizeof(void *) + alignment - 1;
+    addr = (unsigned long)ptr + sizeof(void *) + alignment - 1;
     addr = addr & ~(alignment - 1);
     aligned_ptr = (void *)addr;
 
