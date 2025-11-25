@@ -1,3 +1,6 @@
+# Build both mkparts and nvmetest utilities
+tools: mkparts nvmetest
+	@echo "Built mkparts and nvmetest."
 #!smake
 #
 # Makefile for IRIX NVMe Driver

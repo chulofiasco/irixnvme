@@ -82,7 +82,7 @@ void usage(const char *progname)
     fprintf(stderr, "  %s -x -i                        # INQUIRY with extended debug\n", progname);
     fprintf(stderr, "  %s -s 0 8192                    # Large read (4MB, tests PRP chaining)\n", progname);
     fprintf(stderr, "  %s -R 1000                      # Random write/read stress test\n", progname);
-    fprintf(stderr, "  %s -d /hw/scsi_ctlr/1/... -i   # Test different controller\n", progname);
+    fprintf(stderr, "  %s -d /hw/scsi_ctlr/1/... -i    # Test different controller\n", progname);
     exit(1);
 }
 

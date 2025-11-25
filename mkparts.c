@@ -62,7 +62,7 @@ int main(int argc, char **argv)
     int i;
     struct stat st;
 
-    if (argc > 2) {
+    if (argc > 2 || (argc == 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "-?") == 0))) {
         fprintf(stderr, "\n");
         fprintf(stderr, "mkparts - Create NVMe partition device nodes\n");
         fprintf(stderr, "==========================================\n");
@@ -99,28 +99,29 @@ int main(int argc, char **argv)
         fprintf(stderr, "SEE ALSO:\n");
         fprintf(stderr, "  fx(8), prtvtoc(8), dvhtool(8)\n");
         fprintf(stderr, "\n");
-        return 1;
+        return 0;
     }
 
     /* Get controller number from argument or auto-detect */
     if (argc == 2) {
+        if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "-?") == 0) {
+            /* Already handled above, just exit */
+            return 0;
+        }
         ctlr = atoi(argv[1]);
         if (ctlr < 0 || ctlr > 99) {
             fprintf(stderr, "Error: Invalid controller number: %d\n", ctlr);
             return 1;
         }
-        
         /* Clean up old partition nodes when explicitly specified */
         printf("Cleaning up old partition nodes for controller %d...\n", ctlr);
         for (i = 0; i < NPARTAB; i++) {
             char oldpath[256];
-            
             /* Remove block device nodes */
             snprintf(oldpath, sizeof(oldpath), "/dev/dsk/dks%dd0s%d", ctlr, i);
             if (unlink(oldpath) == 0) {
                 printf("  Removed %s\n", oldpath);
             }
-            
             /* Remove raw/character device nodes */
             snprintf(oldpath, sizeof(oldpath), "/dev/rdsk/dks%dd0s%d", ctlr, i);
             if (unlink(oldpath) == 0) {
