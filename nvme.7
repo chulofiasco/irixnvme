@@ -1,260 +1,51 @@
-.TH NVME 7 "November 2025" "IRIX NVMe Driver"
+.TH nvme 7
 .SH NAME
 nvme \- NVMe storage driver for IRIX 6.5
-.sp
 .SH SYNOPSIS
 .nf
-.B ml ld nvme.o
-.fi
-.sp
+\fBml ld nvme.o\fR
 .SH DESCRIPTION
-This driver provides support for NVMe storage devices. It implements a NVMe to SCSI translation layer that converts
-the NVMe commands into standard SCSI commands that allows
-NVMe SSDs to appear as SCSI devices, enabling compatibility
+.I nvme
+is a loadable kernel driver that provides support for NVMe storage
+devices on IRIX 6.5 systems. It implements a NVMe to SCSI translation
+layer, allowing NVMe SSDs to appear as SCSI devices for compatibility
 with existing IRIX disk utilities and filesystems.
-.sp
-The driver translates between the NVMe 1.0e specification
-and IRIX's SCSI subsystem, allowing modern solid-state
-storage to be used on vintage SGI systems through a
-PCI-to-PCIe bridge adapter.
-.sp
-.SH ARCHITECTURE
-The driver consists of five main components:
-.sp
-.B nvmedrv.c
-.br
-Core driver module handling PCI device discovery, controller
-initialization, interrupt processing, and SCSI controller
-registration.
-.sp
-.B nvme_scsi.c
-.br
-SCSI-to-NVMe translation layer. Converts SCSI commands to
-NVMe commands. Implements INQUIRY, READ CAPACITY, READ/WRITE,
-TEST UNIT READY, MODE SENSE, and SYNC CACHE.
-.sp
-.B nvme_cmd.c
-.br
-NVMe command construction and submission. Builds admin and
-I/O commands.
-.sp
-.B nvme_cpl.c
-.br
-Completion queue processing. Tracks phase bits and processes
-completions.
-.sp
-.B nvme.h, nvmedrv.h
-.br
-Header files containing NVMe specification definitions and
-IRIX-specific driver structures.
-.sp
-.SH "DEVICE PATHS"
-NVMe devices appear in the IRIX hardware graph as SCSI
-controllers at:
-.sp
-.nf
-/hw/module/M/slot/io/pci/N/scsi_ctlr/C/target/0/lun/0/disk
-.fi
-.sp
-Standard SCSI device nodes are created in /dev/dsk and
-/dev/rdsk:
-.sp
-.nf
-/dev/dsk/dksXdYsZ      - Block device (partition Z)
-/dev/rdsk/dksXdYsZ     - Raw/character device (partition Z)
-/dev/rdsk/dksXdYvol    - Volume header device
-.fi
-.sp
-Where X is the SCSI controller number, Y is always 0 (drive 0),
-and Z is the partition number (0-15).
-.sp
-.SH "HARDWARE REQUIREMENTS"
-.B SGI System
-.br
-Any IRIX 6.5 capable system with available PCI slots.
-Tested on IP32 (O2), IP30 (Octane), and IP35 (Fuel).
-.sp
-.B PCI-to-PCIe Bridge
-.br
-Required to connect PCIe NVMe devices to PCI bus. Tested
-with PLX and PERICOM chipsets (Sedna, Startech adapters).
-.sp
-.B NVMe SSD
-.br
-Any NVMe 1.0+ compatible SSD. Tested with Liteon, Patriot,
-and Samsung drives.
-.sp
-.SH INSTALLATION
-.B Loadable Module (Development)
-.sp
-.nf
-cd /path/to/driver/source
-smake                    # Build driver
-smake load              # Load into running kernel
-smake unload            # Unload from kernel
-.fi
-.sp
-.B Permanent Installation
-.sp
-.nf
-smake install           # Install to kernel
-reboot                  # Reboot to activate
-.fi
-.sp
-The install process backs up the current kernel to
-/unix.nvme.bak, copies the driver to /var/sysgen/boot/nvme.o,
-installs configuration files and init scripts, and runs
-autoconfig to rebuild the kernel.
-.sp
-.B Partition Setup
-.sp
-After installation and reboot, run:
-.sp
-.nf
-mkparts                 # Auto-detect controller
-mkparts 3               # Specify controller number
-.fi
-.sp
-.SH CONFIGURATION
-.B Autoregister
-.sp
-The driver uses IRIX's autoregister feature to load
-automatically at boot. The file /var/sysgen/master.d/nvme
-contains the 'R' flag enabling automatic registration during
-kernel boot sequence.
-.sp
-.B Init Scripts
-.sp
-.nf
-/etc/init.d/nvme     - Chkconfig-controlled init script (priority 20)
-/etc/rc2.d/S20nvme   - Startup script that loads driver and creates partitions
-.fi
-.sp
-.SH DEBUGGING
-.B Compile-Time Debug
-.sp
-Uncomment debug defines in source files:
-.sp
-.nf
-NVME_DBG                 - General debug output
-NVME_DBG_EXTRA           - Verbose controller state dumps
-NVME_TRACK_COMPLETIONS   - Detailed completion tracking
-.fi
-.sp
-.B Runtime Debug
-.sp
-Extended debug via nvmetest(1M):
-.sp
-.nf
-nvmetest -x -i           # Query VPD page 0xC0 for status
-.fi
-.sp
-This triggers the kernel driver to output to /var/adm/SYSLOG
-showing outstanding requests, CSTS register, and controller
-status bits.
-.sp
-Note: The driver must be reloaded or reinstalled for VPD
-page 0xC0 support. Run "smake load" to reload the driver.
-.sp
-.B Module Loader Commands
-.sp
-.nf
-ml list                  # Show loaded modules
-ml list | grep nvme      # Check if nvme is loaded
-ml stat <ID>             # Show module statistics
-ml unld <ID>             # Unload by module ID
-.fi
-.sp
-.SH LIMITATIONS
-.B Single Namespace
-.br
-Only namespace 1 is supported.
-.sp
-.B No Hotplug
-.br
-Device must be present at boot/load time.
-.sp
-.B No MSI/MSI-X
-.br
-Uses legacy PCI interrupts only.
-.sp
-.B Block Size
-.br
-Fixed 512-byte block size. Native 4K sectors are not
-exposed.
-.sp
-.B Transfer Size
-.br
-Limited by controller's MDTS capability, typically 1-4MB
-per command.
-.sp
+.PP
+The driver translates between the NVMe 1.0e specification and IRIX's
+SCSI subsystem, enabling modern solid-state storage to be used on
+vintage SGI systems through a PCI to PCIe bridge adapter.
 .SH FILES
-.nf
-/var/sysgen/boot/nvme.o          - Compiled driver module
-/var/sysgen/master.d/nvme        - Master device configuration
-/var/sysgen/system/nvme.sm       - System configuration file
-/etc/init.d/nvme                 - Init script for driver loading
-/etc/rc2.d/S20nvme               - Startup script symlink
-/hw/scsi_ctlr/C/...              - Hardware graph nodes
-/dev/dsk/dksXdYsZ                - Block device nodes
-/dev/rdsk/dksXdYsZ               - Character device nodes
-/dev/rdsk/dksXdYvol              - Volume header device
-/var/adm/SYSLOG                  - System log for driver messages
-.fi
-.sp
-.SH DIAGNOSTICS
-Common messages in /var/adm/SYSLOG:
-.sp
-.nf
-"nvme: Controller capabilities: MQES=N"  - Maximum queue entries
-"nvme: Model: <string>"                  - NVMe SSD model
-"nvme: Serial: <string>"                 - Device serial number
-"nvme: Firmware: <string>"               - Firmware revision
-"nvme: Namespace size: N blocks"         - Total capacity
-"nvme: Controller ready"                 - Successful initialization
-"nvme: Controller not ready"             - Initialization timeout
-"nvme: Failed to create I/O queues"      - Admin command failure
-.fi
-.sp
-.SH "SEE ALSO"
-nvmetest(1M), mkparts(1M), ml(1M), dksc(7), fx(1M), hinv(1M),
-autoconfig(1M), chkconfig(1M)
-.sp
-.SH STANDARDS
-Implements NVMe Base Specification 1.0e (June 2011)
-.br
-SCSI Primary Commands - 3 (SPC-3) emulation subset
-.sp
-.SH HISTORY
-Developed in 2024-2025 to enable modern NVMe storage on
-vintage SGI IRIX systems.
-.sp
-.SH BUGS
-.B Unload Incomplete
-.br
-Driver unload may leave residual state. Reboot recommended.
-.sp
-.B Stale Hardware Graph Entries
-.br
-If NVMe hardware is moved to a different PCI slot, stale
-entries in /hw/scsi_ctlr/ may persist. The nvmetest utility
-uses stat() to verify paths before access to avoid panics,
-but other tools may not. Use "ioconfig -f /hw" to see
-controller mapping. Rebooting clears stale entries.
-.sp
-.B Some SSDs Not Detected
-.br
-Certain newer NVMe devices (e.g., Samsung 990 EVO) may not
-enumerate properly on PCI-to-PCIe bridges. PLX-based bridges
-are generally more compatible.
-.sp
-.B Error Recovery Minimal
-.br
-Limited error recovery for controller fatal errors. System
-may panic on severe NVMe faults.
-.sp
+.TP
+.I /var/sysgen/boot/nvme.o
+Compiled driver module
+.TP
+.I /var/sysgen/master.d/nvme
+Master device configuration
+.TP
+.I /etc/init.d/nvme
+Init script for driver loading
+.TP
+.I /hw/scsi_ctlr/C/...
+Hardware graph nodes
+.TP
+.I /dev/dsk/dksXd0sN
+Block device nodes
+.TP
+.I /dev/rdsk/dksXd0sN
+Character device nodes
+.TP
+.I /var/adm/SYSLOG
+System log for driver messages
 .SH AUTHORS
 IRIX NVMe Driver Project
-.sp
 .SH COPYRIGHT
-Copyright (c) 2024-2025. Released under BSD 3-Clause License.
+Copyright \(co 2024-2025 IRIX NVMe Driver Project.
+.br
+Licensed under the BSD 3-Clause License.
+.br
+This is free software; you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+.SH SEE ALSO
+.BR nvmetest (1M),
+.BR mkparts (1M),
+.BR ml (1M)

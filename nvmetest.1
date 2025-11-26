@@ -1,161 +1,65 @@
-.TH NVMETEST 1M "November 2025" "IRIX NVMe Driver"
+.TH nvmetest 1M
 .SH NAME
 nvmetest \- NVMe device testing utility
-.sp
 .SH SYNOPSIS
-.B nvmetest
-[\fIOPTIONS\fR]
-.sp
+.nf
+\fBnvmetest\fR [\fIOPTION\fR]
+\fBnvmetest\fR [\fI-h\fR]
 .SH DESCRIPTION
-.B nvmetest
-is a utility for testing NVMe devices through the IRIX SCSI
-translation layer. It performs various diagnostic and
-performance tests on NVMe controllers.
-.sp
+.I nvmetest
+is a utility for testing NVMe devices through the IRIX SCSI translation
+layer. It performs various diagnostic and performance tests on NVMe
+controllers.
+.PP
 The utility auto-detects the NVMe controller by scanning
-/hw/scsi_ctlr/0-15/target/0/lun/0/scsi and identifying
-devices with "NVMe" vendor ID.
-.sp
+/hw/scsi_ctlr/0-15 and identifying devices with "NVMe" vendor ID.
 .SH OPTIONS
-.B \-d \fIPATH\fR
-.br
-Specify device path (default: auto-detect)
-.sp
-.B \-x
-.br
-Enable extended debug output. Shows controller status by
-querying VPD page 0xC0, which triggers detailed status
-information to be written to syslog.
-.sp
-.B \-i
-.br
-Test INQUIRY command. Displays vendor, product, and revision
-information.
-.sp
-.B \-c
-.br
-Test READ CAPACITY command. Shows maximum LBA, block size,
-and total capacity.
-.sp
-.B \-r \fILBA\fR
-.br
-Read single block at specified LBA (Logical Block Address).
-.B \-s \fILBA\fR \fICOUNT\fR
-.br
-Read COUNT blocks starting at LBA. Useful for testing
-sequential reads and PRP list chaining with large transfers.ul for testing sequential reads and
-PRP list chaining with large transfers.
-.sp
-.B \-W \fILBA\fR
-.br
-Write single block at specified LBA.
-.sp
-.B \-S \fILBA\fR \fICOUNT\fR
-.br
-Write COUNT blocks starting at LBA.
-.sp
-.B \-w \fILBA\fR
-.br
-Write/Read test at specified LBA. Writes a test pattern and
-verifies it.
-.sp
-.B \-R \fIITERATIONS\fR
-.br
-Random write/read stress test (default: 100 iterations).
-Tests random access patterns with various block counts and
-alignments.
-.sp
-.B \-a
-.br
-Run all basic tests (INQUIRY, READ CAPACITY, single block
-read).
-.sp
+.TP
 .B \-h
-.br
-Show help message and exit.
-.sp
-.SH EXAMPLES
-.B Run all basic tests:
-.sp
-.nf
-nvmetest -a
-.fi
-.sp
-.B Show device information with extended debug:
-.sp
-.nf
-nvmetest -x -i
-.fi
-.sp
-.B Test large sequential read (4MB, 8192 blocks):
-.sp
-.nf
-nvmetest -s 0 8192
-.fi
-.sp
-.B Run random write/read stress test:
-.sp
-.nf
-nvmetest -R 1000
-.fi
-.sp
-.B Test specific controller:
-.sp
-.nf
-nvmetest -d /hw/scsi_ctlr/3/target/0/lun/0/scsi -i
-.fi
-.sp
-.SH DIAGNOSTICS
-.B Auto-detecting NVMe controller...
-.br
-The utility is scanning for NVMe devices. Controller numbers
-that fail to open or return non-NVMe INQUIRY data are
-silently skipped.
-.sp
-.B Found NVMe controller at: /hw/scsi_ctlr/N/...
-.br
-Auto-detection succeeded. The NVMe device is at the specified
-path.
-.sp
-.B ERROR: No NVMe controller found
-.br
-No NVMe devices were found during auto-detection. Ensure the
-driver is loaded with "ml list | grep nvme".
-.sp
-.B Extended Debug Info
-.br
-When -x is used with -i, controller status information
-including outstanding requests, CSTS register, and status
-bits (RDY, CFS, SHST, NSSRO) are written to /var/adm/SYSLOG.
-.sp
-Note: If you get "unsupported VPD page 0xc0" warning, the
-loaded driver is an old version. Rebuild and reload with
-"smake load" or reinstall with "smake install".
-.sp
-.SH FILES
-.nf
-/hw/scsi_ctlr/N/target/0/lun/0/scsi  - SCSI device nodes
-/var/adm/SYSLOG                      - System log file
-.fi
-.sp
-.SH "SEE ALSO"
-mkparts(1M), nvme(7), ml(1M), hinv(1M)
-.sp
-.SH NOTES
-.B nvmetest
-must be run as root to access SCSI device nodes.
-.sp
-The utility uses IRIX dsreq (direct SCSI request) interface
-for communication.
-.sp
-Auto-detection scans /hw/scsi_ctlr/0-15 and uses stat() to
-verify paths are valid before attempting to open them. This
-avoids triggering kernel panics from stale hardware graph
-entries. Error messages are suppressed by redirecting stderr
-to /dev/null during the scan.
-.sp
-If you get unexpected results, use "ioconfig -f /hw" to see
-the current hardware graph and verify controller numbers.
-.sp
+Print a usage message on standard output and exit successfully.
+.TP
+.B \-d \fIPATH
+\fRSpecify device path (default: auto-detect).
+.TP
+.B \-x
+Enable extended debug output. Shows controller status by querying VPD
+page 0xC0.
+.TP
+.B \-i
+Test INQUIRY command. Displays vendor, product, and revision information.
+.TP
+.B \-c
+Test READ CAPACITY command. Shows maximum LBA, block size, and total
+capacity.
+.TP
+.B \-r \fILBA
+\fRRead single block at specified LBA.
+.TP
+.B \-s \fILBA COUNT
+\fRRead COUNT blocks starting at LBA.
+.TP
+.B \-W \fILBA
+\fRWrite single block at specified LBA.
+.TP
+.B \-S \fILBA COUNT
+\fRWrite COUNT blocks starting at LBA.
+.TP
+.B \-w \fILBA
+\fRWrite/Read test at specified LBA.
+.TP
+.B \-R \fIITERATIONS
+\fRRandom write/read stress test (default: 100 iterations).
+.TP
+.B \-a
+Run all basic tests.
 .SH AUTHORS
 IRIX NVMe Driver Project
+.SH COPYRIGHT
+Copyright \(co 2025 IRIX NVMe Driver Project.
+.br
+Licensed under the GNU GPL version 2 or later.
+.br
+This is free software; you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+.SH SEE ALSO
+.BR mkparts (1M)
