@@ -1,0 +1,98 @@
+#!/bin/sh
+#
+# NVMe Driver Init Script
+#
+# chkconfig: 2 05 80
+# description: Load NVMe driver for NVMe SSD support
+#
+# This script loads the NVMe driver module at boot time
+# Enable with: chkconfig nvme on
+# Disable with: chkconfig nvme off
+#
+
+IS_ON=/etc/chkconfig
+MODULE=/var/sysgen/boot/nvme.o
+PREFIX=nvme_
+
+if $IS_ON verbose ; then
+    ECHO=echo
+    VERBOSE=1
+else
+    ECHO=:
+    VERBOSE=0
+fi
+
+case "$1" in
+  'start')
+    # Check if nvme driver should be started
+    if $IS_ON nvme ; then
+        # Check if module file exists
+        if [ ! -f $MODULE ]; then
+            echo "ERROR: NVMe module not found: $MODULE"
+            echo "Run 'make install' to install the driver"
+            exit 1
+        fi
+
+        # Check if already loaded
+        if /sbin/ml list | grep -q "prefix ${PREFIX}"; then
+            $ECHO "NVMe driver already loaded"
+            exit 0
+        fi
+
+        # Load the driver
+        if [ $VERBOSE -eq 0 ]; then
+            echo "Loading NVMe Disk Driver..."
+        else
+            $ECHO "Loading NVMe driver..."
+        fi
+        
+        if /sbin/ml ld -v -c $MODULE -p $PREFIX -s -1 -t 0 ; then
+            $ECHO "NVMe driver loaded successfully"
+            
+            # Run mkparts to create device nodes
+            $ECHO "Creating device nodes..."
+            if [ -x /sbin/mkparts ]; then
+                if [ $VERBOSE -eq 1 ]; then
+                    /sbin/mkparts
+                else
+                    /sbin/mkparts > /dev/null 2>&1
+                fi
+                $ECHO "Device nodes created"
+            else
+                echo "WARNING: mkparts not found, device nodes not created"
+            fi
+            
+            if [ $VERBOSE -eq 0 ]; then
+                echo "NVMe Disk Driver Initialized."
+            fi
+        else
+            echo "ERROR: NVMe Disk Driver failed to load!"
+            exit 1
+        fi
+    fi
+    ;;
+
+  'stop')
+    # Check if driver is loaded
+    if /sbin/ml list | grep -q "prefix ${PREFIX}"; then
+        $ECHO "Unloading NVMe driver..."
+        # Get module ID and unload
+        for id in `/sbin/ml list | grep "prefix ${PREFIX}" | sed 's/Id: *\([0-9]*\).*/\1/'`; do
+            if /sbin/ml unld -v $id ; then
+                $ECHO "NVMe driver unloaded"
+            else
+                echo "WARNING: Failed to unload NVMe driver (may be in use)"
+            fi
+        done
+    else
+        $ECHO "NVMe driver not loaded"
+    fi
+    ;;
+
+  *)
+    echo "Usage: $0 {start|stop}"
+    exit 1
+    ;;
+esac
+
+exit 0

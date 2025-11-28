@@ -512,7 +512,9 @@ nvme_admin_query_features(nvme_soft_t *soft)
 #endif
     }
 
-    cmn_err(CE_NOTE, "nvme: Queried %d controller features", num_features);
+    if (nvme_verbose) {
+        cmn_err(CE_NOTE, "nvme: Queried %d controller features", num_features);
+    }
     return 1;
 }
 

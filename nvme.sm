@@ -1,0 +1,5 @@
+*
+* Lboot config file for IRIX 6.5 NVMe driver "nvme"
+* Store as /var/sysgen/system/nvme.sm
+*
+USE: nvme

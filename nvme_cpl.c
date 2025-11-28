@@ -230,15 +230,15 @@ nvme_handle_admin_completion(nvme_soft_t *soft, nvme_queue_t *q, nvme_completion
             soft->oncs_verify = (oncs & NVME_ONCS_VERIFY) ? 1 : 0;
         }
 
-//#ifdef NVME_DBG
-        cmn_err(CE_NOTE, "nvme: Controller - SN=%s, Model=%s, FW=%s, NS=%d",
-                soft->serial, soft->model, soft->firmware_rev, soft->num_namespaces);
-        cmn_err(CE_NOTE, "nvme: MDTS=%d (max transfer = %d blocks = %d KB)",
-                soft->mdts, soft->max_transfer_blocks,
-                (soft->max_transfer_blocks * 512) / 1024);
-        cmn_err(CE_NOTE, "nvme: ONCS - Compare:%d DSM(TRIM):%d Verify:%d",
-                soft->oncs_compare, soft->oncs_dataset_mgmt, soft->oncs_verify);
-//#endif
+        if (nvme_verbose) {
+            cmn_err(CE_NOTE, "nvme: Controller - SN=%s, Model=%s, FW=%s, NS=%d",
+                    soft->serial, soft->model, soft->firmware_rev, soft->num_namespaces);
+            cmn_err(CE_NOTE, "nvme: MDTS=%d (max transfer = %d blocks = %d KB)",
+                    soft->mdts, soft->max_transfer_blocks,
+                    (soft->max_transfer_blocks * 512) / 1024);
+            cmn_err(CE_NOTE, "nvme: ONCS - Compare:%d DSM(TRIM):%d Verify:%d",
+                    soft->oncs_compare, soft->oncs_dataset_mgmt, soft->oncs_verify);
+        }
         break;
 
     case NVME_ADMIN_CID_IDENTIFY_NAMESPACE: {
@@ -336,7 +336,9 @@ nvme_handle_admin_completion(nvme_soft_t *soft, nvme_queue_t *q, nvme_completion
         cmn_err(CE_NOTE, "nvme_handle_admin_completion: processing Set Features");
 #endif
         /* Set Features completion - DW0 may contain previous feature value */
-        cmn_err(CE_NOTE, "nvme: Set Features completed (previous value=0x%08x)", cpl->dw0);
+        if (nvme_verbose) {
+            cmn_err(CE_NOTE, "nvme: Set Features completed (previous value=0x%08x)", cpl->dw0);
+        }
         break;
 
     default:
@@ -366,8 +368,10 @@ nvme_handle_admin_completion(nvme_soft_t *soft, nvme_queue_t *q, nvme_completion
                     case NVME_FEAT_ASYNC_EVENT_CONFIG:    feature_name = "Async Event Config"; break;
                     default:                              feature_name = "Unknown"; break;
                     }
-                    cmn_err(CE_NOTE, "nvme: Feature 0x%02x (%s) supported (capability mask=0x%08x)",
-                            fid, feature_name, feature_value);
+                    if (nvme_verbose) {
+                        cmn_err(CE_NOTE, "nvme: Feature 0x%02x (%s) supported (capability mask=0x%08x)",
+                                fid, feature_name, feature_value);
+                    }
                 }
             } else {
                 cmn_err(CE_WARN, "nvme: Get Features FID=0x%02x out of range", fid);
