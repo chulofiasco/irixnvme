@@ -1,0 +1,60 @@
+.TH mkparts 1M
+.SH NAME
+mkparts \- create NVMe device partition nodes
+.SH SYNOPSIS
+.nf
+\fBmkparts\fR [\fICONTROLLER\fR]
+.SH DESCRIPTION
+.I mkparts
+reads the volume header from an NVMe device and displays partition
+information. The kernel driver automatically creates partition device
+nodes when the volume header is read via DIOCREADVOLHDR ioctl.
+.PP
+When run without arguments,
+.I mkparts
+auto-detects the NVMe controller by scanning /hw/scsi_ctlr/0-15 and
+looking for controllers with "NVMe" vendor ID.
+.PP
+When a controller number is explicitly specified,
+.I mkparts
+first removes any existing partition nodes for that controller before
+creating new ones.
+.SH ARGUMENTS
+.TP
+.I CONTROLLER
+SCSI controller number (0-15). If not specified, auto-detection is used.
+.SH EXAMPLES
+Auto-detect controller and create partitions:
+.PP
+.nf
+mkparts
+.PP
+Create partitions for controller 3:
+.PP
+.nf
+mkparts 3
+.SH FILES
+.TP
+.I /hw/scsi_ctlr/N/target/0/lun/0/disk
+Hardware graph nodes
+.TP
+.I /dev/dsk/dksXd0sN
+Block device nodes
+.TP
+.I /dev/rdsk/dksXd0sN
+Character device nodes
+.TP
+.I /dev/rdsk/dksXd0vol
+Volume header device
+.SH AUTHORS
+IRIX NVMe Driver Project
+.SH COPYRIGHT
+Copyright \(co 2025 IRIX NVMe Driver Project.
+.br
+Licensed under the GNU GPL version 2 or later.
+.br
+This is free software; you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+.SH SEE ALSO
+.BR nvmetest (1M),
+.BR fx (1M)

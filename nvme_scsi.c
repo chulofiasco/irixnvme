@@ -224,6 +224,27 @@ nvme_scsi_inquiry(nvme_soft_t *soft, scsi_request_t *req)
 
             /* All other fields remain zero (bzero above) */
             copy_len = 64;
+        } else if (page_code == 0xC0) {
+            /* Vendor-Specific Debug Status Page */
+            /* Returns CSTS register for debugging - no syslog spam */
+            uint_t csts;
+            
+            csts = NVME_RD(soft, NVME_REG_CSTS);
+            
+            /* Return minimal VPD page with CSTS register */
+            if (req->sr_buflen < 8) {
+                nvme_set_adapter_error(req);
+                return -1;
+            }
+            buffer[0] = 0x00;  /* Peripheral Device Type */
+            buffer[1] = 0xC0;  /* Page Code: Debug Status */
+            buffer[2] = 0x00;  /* Reserved */
+            buffer[3] = 0x04;  /* Page Length */
+            buffer[4] = (csts >> 24) & 0xFF;
+            buffer[5] = (csts >> 16) & 0xFF;
+            buffer[6] = (csts >> 8) & 0xFF;
+            buffer[7] = csts & 0xFF;
+            copy_len = 8;
         } else {
             /* Unsupported VPD page */
             cmn_err(CE_WARN, "nvme_scsi_inquiry: unsupported VPD page 0x%x", page_code);
@@ -244,18 +265,6 @@ nvme_scsi_inquiry(nvme_soft_t *soft, scsi_request_t *req)
         }
 
         bcopy(inquiry_data, buffer, copy_len);
-        {
-            uint_t csts;
-            cmn_err(CE_WARN, "nvme: outstanding reqs: %d,%d", soft->admin_queue.outstanding, soft->io_queue.outstanding);
-            csts = NVME_RD(soft, NVME_REG_CSTS);
-            cmn_err(CE_WARN, "CSTS (0x1C): 0x%08x", csts);
-            cmn_err(CE_CONT, "  RDY (Ready):                 %u %s",
-                    csts & 1, (csts & 1) ? "[READY]" : "[NOT READY]");
-            cmn_err(CE_CONT, "  CFS (Controller Fatal):      %u %s",
-                    (csts >> 1) & 1, ((csts >> 1) & 1) ? "[FATAL ERROR!]" : "[OK]");
-            cmn_err(CE_CONT, "  SHST (Shutdown Status):      %u", (csts >> 2) & 3);
-            cmn_err(CE_CONT, "  NSSRO (NVM Subsys Reset):    %u", (csts >> 4) & 1);
-        }
     }
 
     nvme_set_success(req);
@@ -1100,6 +1109,25 @@ nvme_scsi_ioctl(vertex_hdl_t ctlr_vhdl, unsigned int cmd, struct scsi_ha_op *op)
         copyout(&sp, (void *)op->sb_addr, sizeof(struct scsi_parms));
         return 0;
     }
+    
+    /* SCSI_IOCTL_GETBUSYTARGETS - report which SCSI targets are busy */
+    case 0x731a:  /* SCSI_IOCTL_GETBUSYTARGETS */
+#ifdef NVME_DBG
+        cmn_err(CE_NOTE, "nvme_scsi_ioctl: SCSI_IOCTL_GETBUSYTARGETS (0x731a)");
+#endif
+        /* NVMe doesn't have the concept of busy targets on a SCSI bus.
+         * Return 0 = no targets busy */
+        *(int*)op->sb_addr = 0;
+        return 0;
+    
+    case 0x731b:  /* SCSI_IOCTL_GETRESID */
+#ifdef NVME_DBG
+        cmn_err(CE_NOTE, "nvme_scsi_ioctl: SCSI_IOCTL_GETRESID (0x731b)");
+#endif
+        /* NVMe completes whole command - no residual data */
+        *(int*)op->sb_addr = 0;
+        return 0;
+
     default:
         cmn_err(CE_WARN, "nvme_scsi_ioctl: unknown ioctl 0x%x", cmd);
         return EINVAL;

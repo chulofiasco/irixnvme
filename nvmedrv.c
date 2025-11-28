@@ -10,6 +10,7 @@
 /*
  * Module version information, required for loadable modules.
  */
+#include <sys/mload.h>
 char *nvme_mversion = M_VERSION;
 
 /*
@@ -61,6 +62,9 @@ int nvme_devflag = D_MP;
 /* Useful macros */
 #define NEW(ptr)    (ptr = kmem_zalloc(sizeof (*(ptr)), KM_SLEEP))
 #define DEL(ptr)    (kmem_free(ptr, sizeof (*(ptr))))
+
+/* Global verbose flag - set from showconfig during init */
+int nvme_verbose = 0;
 
 /*
  * nvme_log2 - Calculate log2 of a power-of-2 value
@@ -187,7 +191,43 @@ nvme_error_handler(void *einfo, int error_code, ioerror_mode_t mode, ioerror_t *
 void
 nvme_init(void)
 {
-    cmn_err(CE_NOTE, "nvme_init: NVMe driver for IRIX initializing");
+    vnode_t *vp;
+    int error;
+    char buf[16];
+    ssize_t len;
+    
+    /* Check if verbose mode is enabled by reading /etc/config/verbose */
+    nvme_verbose = 0;  /* Default to quiet */
+    error = lookupname("/etc/config/verbose", UIO_SYSSPACE, NO_FOLLOW, NULLVPP, &vp, NULL);
+    if (error == 0) {
+        /* File exists, read it to check if it says "on" */
+        struct uio auio;
+        struct iovec aiov;
+        
+        aiov.iov_base = buf;
+        aiov.iov_len = sizeof(buf) - 1;
+        auio.uio_iov = &aiov;
+        auio.uio_iovcnt = 1;
+        auio.uio_offset = 0;
+        auio.uio_segflg = UIO_SYSSPACE;
+        auio.uio_fmode = 0;
+        auio.uio_resid = sizeof(buf) - 1;
+        
+        VOP_READ(vp, &auio, 0, get_current_cred(), NULL, error);
+        if (error == 0 && auio.uio_resid < sizeof(buf) - 1) {
+            len = (ssize_t)(sizeof(buf) - 1 - auio.uio_resid);
+            buf[len] = '\0';
+            /* Check if it starts with "on" */
+            if (len >= 2 && buf[0] == 'o' && buf[1] == 'n') {
+                nvme_verbose = 1;
+            }
+        }
+        VN_RELE(vp);
+    }
+    
+    if (nvme_verbose) {
+        cmn_err(CE_NOTE, "nvme_init: NVMe driver for IRIX initializing");
+    }
 
     /* If we are already registered, this is a reload */
     pciio_iterate("nvme_", nvme_reloadme);
@@ -217,7 +257,9 @@ nvme_unload(void)
 int
 nvme_reg(void)
 {
-    cmn_err(CE_NOTE, "nvme_reg: registering NVMe driver with wildcard matching");
+    if (nvme_verbose) {
+        cmn_err(CE_NOTE, "nvme_reg: registering NVMe driver with wildcard matching");
+    }
 
     /*
      * Register with wildcards (-1, -1) to get called for ALL PCI devices.
@@ -238,7 +280,9 @@ nvme_reg(void)
 int
 nvme_unreg(void)
 {
-    cmn_err(CE_NOTE, "nvme_unreg: unregistering NVMe driver");
+    if (nvme_verbose) {
+        cmn_err(CE_NOTE, "nvme_unreg: unregistering NVMe driver");
+    }
 
     pciio_driver_unregister("nvme_");
 
@@ -799,14 +843,18 @@ nvme_initialize(nvme_soft_t *soft)
         hwgraph_vertex_name_get(soft->pci_vhdl,
                                 name,
                                 sizeof(name));
-        cmn_err(CE_WARN, "PCI vertex is %s", name);
+        if (nvme_verbose) {
+            cmn_err(CE_WARN, "PCI vertex is %s", name);
+        }
 
         xconn_vhdl = device_master_get(soft->pci_vhdl);
 
         hwgraph_vertex_name_get(xconn_vhdl,
                                 name,
                                 sizeof(name));
-        cmn_err(CE_WARN, "PCI parent vertex is %s", name);
+        if (nvme_verbose) {
+            cmn_err(CE_WARN, "PCI parent vertex is %s", name);
+        }
 
         if (soft->pcie_bridge_vhdl) {
             hwgraph_vertex_name_get(soft->pcie_bridge_vhdl,
@@ -847,15 +895,19 @@ nvme_initialize(nvme_soft_t *soft)
 
     soft->min_page_size = (uint_t)((soft->cap >> 48) & 0xF);
     soft->max_page_size = (uint_t)((soft->cap >> 52) & 0xF);
-    cmn_err(CE_NOTE, "nvme: system page size %u supported range %u-%u",
-            NBPP, 1u << (soft->min_page_size + 12), 1u << (soft->max_page_size + 12));            
+    if (nvme_verbose) {
+        cmn_err(CE_NOTE, "nvme: system page size %u supported range %u-%u",
+                NBPP, 1u << (soft->min_page_size + 12), 1u << (soft->max_page_size + 12));
+    }
 #ifdef NVME_FORCE_4K
         soft->nvme_page_size = 4096;
         soft->nvme_page_shift = 12;
 #else            
     if (PAGE_SHIFT < soft->min_page_size + 12 || PAGE_SHIFT > soft->max_page_size + 12) {
-        cmn_err(CE_WARN, "nvme: system page size %u outside supported range %u-%u",
-                NBPP, 1u << (soft->min_page_size + 12), 1u << (soft->max_page_size + 12));
+        if (nvme_verbose) {
+            cmn_err(CE_WARN, "nvme: system page size %u outside supported range %u-%u",
+                    NBPP, 1u << (soft->min_page_size + 12), 1u << (soft->max_page_size + 12));
+        }
         soft->nvme_page_shift = soft->min_page_size + 12;        
         soft->nvme_page_size = 1u << soft->nvme_page_shift;
     } else {
@@ -1220,7 +1272,9 @@ nvme_initialize(nvme_soft_t *soft)
 #ifndef NVME_COMPLETION_MANUAL
             nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
 #endif
-            cmn_err(CE_NOTE, "nvme: Interrupt coalescing configured (10 completions, 500us)");
+            if (nvme_verbose) {
+                cmn_err(CE_NOTE, "nvme: Interrupt coalescing configured (10 completions, 500us)");
+            }
         } else {
             cmn_err(CE_WARN, "nvme: Failed to configure interrupt coalescing");
         }
@@ -1736,8 +1790,10 @@ nvme_attach(vertex_hdl_t conn)
     nvme_dev_counter++;
 
     /* This is an NVMe device! */
-    cmn_err(CE_NOTE, "nvme_attach: found NVMe device %04x:%04x (class %06x) at conn 0x%x",
-            vendor_id, device_id, class_code, conn);
+    if (nvme_verbose) {
+        cmn_err(CE_NOTE, "nvme_attach: found NVMe device %04x:%04x (class %06x) at conn 0x%x",
+                vendor_id, device_id, class_code, conn);
+    }
 
 #ifdef NVME_DBG
     /* Dump the bridge configuration of the parent (if it's a bridge) to understand topology */
@@ -1955,7 +2011,9 @@ nvme_attach(vertex_hdl_t conn)
         */
         soft->adap = nvme_get_next_adapter_num();
 
-        cmn_err(CE_NOTE, "nvme_attach: PCI slot=%d, assigned adapter=%d", slot, soft->adap);
+        if (nvme_verbose) {
+            cmn_err(CE_NOTE, "nvme_attach: PCI slot=%d, assigned adapter=%d", slot, soft->adap);
+        }
 
         /* Create SCSI controller vertex under the PCI connection */
         sprintf(loc_str, "%s/%d", EDGE_LBL_SCSI_CTLR, SCSI_EXT_CTLR(soft->adap));
@@ -2050,18 +2108,20 @@ nvme_attach(vertex_hdl_t conn)
          * Add device to system inventory
          * This is critical for ioconfig to recognize the controller
          * Use INV_SCSICONTROL instead of INV_PCI_SCSICONTROL so ioconfig spawns a process
-         * State=0 for generic/unknown controller type (shows up as WD33 for internal)
+         * State: 15 = INV_QL_1280 (QLogic 1280)
          */
         device_inventory_add(ctlr_vhdl,
                             INV_DISK,             /* class: disk controller */
                             INV_SCSICONTROL,      /* type: SCSI controller */
                             soft->adap,           /* controller number */
                             0,                    /* unit number */
-                            0);                   /* state: 0 = generic/unknown */
+                            15);                  /* state: 15 = INV_QL_1280 (QLogic 1280) */
 
-        cmn_err(CE_NOTE, "nvme_attach: registered as SCSI adapter %d", soft->adap);
-        cmn_err(CE_NOTE, "nvme_attach: added device inventory: class=INV_DISK, type=INV_SCSICONTROL, ctlr=%d",
-                soft->adap);
+        if (nvme_verbose) {
+            cmn_err(CE_NOTE, "nvme_attach: registered as SCSI adapter %d", soft->adap);
+            cmn_err(CE_NOTE, "nvme_attach: added device inventory: class=INV_DISK, type=INV_SCSICONTROL, ctlr=%d",
+                    soft->adap);
+        }
 
         /*
          * Probe target and LUN during attach

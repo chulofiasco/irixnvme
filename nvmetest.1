@@ -1,0 +1,65 @@
+.TH nvmetest 1M
+.SH NAME
+nvmetest \- NVMe device testing utility
+.SH SYNOPSIS
+.nf
+\fBnvmetest\fR [\fIOPTION\fR]
+\fBnvmetest\fR [\fI-h\fR]
+.SH DESCRIPTION
+.I nvmetest
+is a utility for testing NVMe devices through the IRIX SCSI translation
+layer. It performs various diagnostic and performance tests on NVMe
+controllers.
+.PP
+The utility auto-detects the NVMe controller by scanning
+/hw/scsi_ctlr/0-15 and identifying devices with "NVMe" vendor ID.
+.SH OPTIONS
+.TP
+.B \-h
+Print a usage message on standard output and exit successfully.
+.TP
+.B \-d \fIPATH
+\fRSpecify device path (default: auto-detect).
+.TP
+.B \-x
+Enable extended debug output. Shows controller status by querying VPD
+page 0xC0.
+.TP
+.B \-i
+Test INQUIRY command. Displays vendor, product, and revision information.
+.TP
+.B \-c
+Test READ CAPACITY command. Shows maximum LBA, block size, and total
+capacity.
+.TP
+.B \-r \fILBA
+\fRRead single block at specified LBA.
+.TP
+.B \-s \fILBA COUNT
+\fRRead COUNT blocks starting at LBA.
+.TP
+.B \-W \fILBA
+\fRWrite single block at specified LBA.
+.TP
+.B \-S \fILBA COUNT
+\fRWrite COUNT blocks starting at LBA.
+.TP
+.B \-w \fILBA
+\fRWrite/Read test at specified LBA.
+.TP
+.B \-R \fIITERATIONS
+\fRRandom write/read stress test (default: 100 iterations).
+.TP
+.B \-a
+Run all basic tests.
+.SH AUTHORS
+IRIX NVMe Driver Project
+.SH COPYRIGHT
+Copyright \(co 2025 IRIX NVMe Driver Project.
+.br
+Licensed under the GNU GPL version 2 or later.
+.br
+This is free software; you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+.SH SEE ALSO
+.BR mkparts (1M)

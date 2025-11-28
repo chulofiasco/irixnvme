@@ -1,0 +1,19 @@
+*
+* IRIX 6.5 NVMe driver "nvme" descriptive file
+* Store in /var/sysgen/master.d/nvme
+*
+* Flags used:
+* c: character type device
+* b: block type device
+* d: dynamically loadable kernel module
+* R: autoregister loadable driver
+* s: software device driver
+*
+* External major number is dynamically assigned.
+*
+* #DEV is passed in to the driver and used to configure its info array.
+*
+*  FLAG  PREFIX SOFT #DEV DEPENDENCIES
+cbdRs nvme_       -    -
+$$$
+major_t nvme_majnum = ##E;

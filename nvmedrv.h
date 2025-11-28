@@ -48,6 +48,9 @@
 #include <sys/cmn_err.h>
 #include <sys/errno.h>
 #include <sys/ddi.h>
+#include <sys/vnode.h>
+#include <sys/cred.h>
+#include <sys/uio.h>
 
 /* Memory management */
 #include <sys/kmem.h>
@@ -124,7 +127,27 @@ void bp_heart_invalidate_war(struct buf *bp);
  * Driver Configuration
  */
 #define NVME_ADMIN_QUEUE_SIZE   64      /* Admin queue depth */
-#define NVME_IO_QUEUE_SIZE      512     /* I/O queue depth */
+
+/* I/O queue depth - can be overridden at compile time via -DNVME_IO_QUEUE_SIZE=<n>
+ * Higher values = more outstanding I/O, better throughput but more memory
+ * Must be power of 2, max 65536 per NVMe spec, practical max ~4096 on IRIX */
+#ifndef NVME_IO_QUEUE_SIZE
+#define NVME_IO_QUEUE_SIZE      512     /* Default I/O queue depth */
+#endif
+
+/* SCSI layer queue depth - can be overridden at compile time via -DNVME_SCSI_QUEUE_DEPTH=<n>
+ * Higher queue depth = more concurrent I/O operations, better write performance
+ * Platform-specific defaults based on resource constraints */
+#ifndef NVME_SCSI_QUEUE_DEPTH
+#if defined(IP30)
+#define NVME_SCSI_QUEUE_DEPTH   32      /* Conservative for IP30 */
+#elif defined(IP32)
+#define NVME_SCSI_QUEUE_DEPTH   32      /* Conservative for IP32 */
+#else
+#define NVME_SCSI_QUEUE_DEPTH   64      /* Default for IP35/IP27 */
+#endif
+#endif
+
 #define NVME_WATCHDOG_TIMEOUT_US 2000   /* Watchdog timeout in microseconds (2ms) */
 #define NVME_TIMEOUT_CHECK_INTERVAL_MS 100  /* Check for timeouts every 100ms (10 Hz) */
 
@@ -231,8 +254,15 @@ typedef struct nvme_queue_s {
 
 /*
  * PRP List Pool Configuration
+ * Smaller pool on IP30 due to 16KB page size making large contiguous allocations difficult
+ * IP30: 4 * 4KB = 16KB (exactly 1 IRIX 16KB page - fits in contiguous allocation)
+ * Others: 16 * 4KB = 64KB (allows more concurrent large I/O operations)
  */
-#define NVME_PRP_POOL_SIZE      64      /* Number of PRP list pages (64 * 4KB = 256KB) */
+#if defined(IP30)
+#define NVME_PRP_POOL_SIZE      4       /* 4 NVMe pages = 1 IRIX page on IP30 */
+#else
+#define NVME_PRP_POOL_SIZE      16      /* 16 NVMe pages = reasonable pool size */
+#endif
 
 /*
  * Command Tracking Structure
@@ -621,6 +651,9 @@ void nvme_timeout_watchdog_handler(nvme_soft_t *soft);
 #endif
 
 extern volatile int nvme_intcount;
+
+/* Global verbose flag - controls console output verbosity */
+extern int nvme_verbose;
 
 #pragma set woff 3201
 #pragma set woff 1174

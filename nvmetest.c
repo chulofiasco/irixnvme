@@ -22,13 +22,22 @@
 #include <sys/dkio.h>
 #include <dslib.h>
 
-/* IRIX hardware graph path for controller 2, target 0, lun 0, find some way to find it! */
-#ifdef IP35
-#define DEFAULT_SCSI_PATH "/hw/scsi_ctlr/5/target/0/lun/0/scsi"
-#else
-#define DEFAULT_SCSI_PATH "/hw/scsi_ctlr/2/target/0/lun/0/scsi"
+/* IRIX hardware graph path - controller number can be overridden at compile time */
+#ifndef CTLR_NUM
+  #ifdef IP35
+    #define CTLR_NUM 5
+  #else
+    #define CTLR_NUM 2
+  #endif
 #endif
+
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+#define DEFAULT_SCSI_PATH "/hw/scsi_ctlr/" TOSTRING(CTLR_NUM) "/target/0/lun/0/scsi"
 #define BLOCK_SIZE 512
+
+/* Global flag for extended debug output */
+static int g_extended_debug = 0;
 
 /* Test functions */
 void test_inquiry(int fd);
@@ -49,6 +58,7 @@ void usage(const char *progname)
     fprintf(stderr, "Usage: %s [options]\n", progname);
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -d PATH        Device path (default: %s)\n", DEFAULT_SCSI_PATH);
+    fprintf(stderr, "  -x             Enable extended debug output\n");
     fprintf(stderr, "  -i             Test INQUIRY\n");
     fprintf(stderr, "  -c             Test READ CAPACITY\n");
     fprintf(stderr, "  -r LBA         Read single block at LBA\n");
@@ -61,6 +71,7 @@ void usage(const char *progname)
     fprintf(stderr, "  -h             Show this help\n");
     fprintf(stderr, "\nExamples:\n");
     fprintf(stderr, "  %s -a                           # Run all basic tests\n", progname);
+    fprintf(stderr, "  %s -x -i                        # INQUIRY with extended debug\n", progname);
     fprintf(stderr, "  %s -s 0 8192                    # Large read (4MB, tests PRP chaining)\n", progname);
     fprintf(stderr, "  %s -R 1000                      # Random write/read stress test\n", progname);
     fprintf(stderr, "  %s -d /hw/scsi_ctlr/1/... -i   # Test different controller\n", progname);
@@ -71,6 +82,7 @@ int main(int argc, char *argv[])
 {
     int fd;
     int opt;
+    int extended_debug = 0;
     int test_all = 0;
     int test_inquiry_flag = 0;
     int test_capacity_flag = 0;
@@ -96,10 +108,13 @@ int main(int argc, char *argv[])
     rng_seed = (unsigned int)time(NULL);
 
     /* Parse options */
-    while ((opt = getopt(argc, argv, "d:icr:s:W:S:w:R:ah")) != -1) {
+    while ((opt = getopt(argc, argv, "d:xicr:s:W:S:w:R:ah")) != -1) {
         switch (opt) {
         case 'd':
             device_path = optarg;
+            break;
+        case 'x':
+            extended_debug = 1;
             break;
         case 'i':
             test_inquiry_flag = 1;
@@ -148,6 +163,9 @@ int main(int argc, char *argv[])
             usage(argv[0]);
         }
     }
+
+    /* Set global debug flag */
+    g_extended_debug = extended_debug;
 
     /* Open SCSI device */
     printf("Opening %s...\n", device_path);
@@ -243,6 +261,51 @@ void test_inquiry(int fd)
     printf("Product:  '%s'\n", product);
     printf("Revision: '%s'\n", revision);
     printf("Device Type: 0x%02x\n", inq_data[0] & 0x1F);
+
+    /* Show extended debug info if requested */
+    if (g_extended_debug) {
+        unsigned char vpd_data[8];
+        unsigned char vpd_cdb[6];
+        dsreq_t vpd_req;
+
+        printf("\n=== Extended Debug Info ===\n");
+        printf("Querying controller status...\n");
+        printf("\n");
+
+        /* Send INQUIRY for VPD page 0xC0 (vendor-specific debug) */
+        vpd_cdb[0] = 0x12;  /* INQUIRY */
+        vpd_cdb[1] = 0x01;  /* EVPD=1 */
+        vpd_cdb[2] = 0xC0;  /* Page Code: Debug Status */
+        vpd_cdb[3] = 0;
+        vpd_cdb[4] = sizeof(vpd_data);
+        vpd_cdb[5] = 0;
+
+        bzero(&vpd_req, sizeof(vpd_req));
+        vpd_req.ds_flags = DSRQ_READ | DSRQ_SENSE;
+        vpd_req.ds_time = 5000;
+        vpd_req.ds_cmdbuf = (caddr_t)vpd_cdb;
+        vpd_req.ds_cmdlen = 6;
+        vpd_req.ds_databuf = (caddr_t)vpd_data;
+        vpd_req.ds_datalen = sizeof(vpd_data);
+        bzero(vpd_data, sizeof(vpd_data));
+
+        if (ioctl(fd, DS_ENTER, &vpd_req) == 0 && vpd_req.ds_status == 0) {
+            unsigned int csts = (vpd_data[4] << 24) | (vpd_data[5] << 16) | 
+                               (vpd_data[6] << 8) | vpd_data[7];
+            int rdy = csts & 1;
+            int cfs = (csts >> 1) & 1;
+            int shst = (csts >> 2) & 3;
+            int nssro = (csts >> 4) & 1;
+            printf("CSTS Register: 0x%08x\n", csts);
+            printf("  RDY (Ready): %d %s\n", rdy, rdy ? "[READY]" : "[NOT READY]");
+            printf("  CFS (Controller Fatal): %d %s\n", cfs, cfs ? "[FATAL ERROR!]" : "[OK]");
+            printf("  SHST (Shutdown Status): %d\n", shst);
+            printf("  NSSRO (NVM Subsys Reset): %d\n", nssro);
+        } else {
+            printf("Failed to query debug status\n");
+        }
+    }
+
     printf("\n");
 }
 
