@@ -1,0 +1,24 @@
+f 0644 root sys /etc/init.d/nvme.init nvme.init irixnvme.sw.base
+f 0755 root sys /sbin/mkparts mkparts irixnvme.sw.base
+f 0755 root sys /sbin/nvmetest nvmetest irixnvme.sw.base
+d 0755 root sys /usr/share/catman/local/cat1 irixnvme.sw.man
+f 0644 root sys /usr/share/catman/local/cat1/mkparts.1 mkparts.1 irixnvme.sw.man
+f 0644 root sys /usr/share/catman/local/cat1/nvmetest.1 nvmetest.1 irixnvme.sw.man
+d 0755 root sys /usr/share/catman/local/cat7 irixnvme.sw.man
+f 0644 root sys /usr/share/catman/local/cat7/nvme.7 nvme.7 irixnvme.sw.man
+d 0755 root sys /usr/share/doc/irixnvme irixnvme.sw.base
+f 0644 root sys /usr/share/doc/irixnvme/LICENSE LICENSE irixnvme.sw.base
+f 0644 root sys /usr/share/doc/irixnvme/README.md README.md irixnvme.sw.base
+d 0755 root sys /usr/share/src/irixnvme irixnvme.src.base
+f 0644 root sys /usr/share/src/irixnvme/irixnvme-src.tar.gz irixnvme-src.tar.gz irixnvme.src.base
+d 0755 root sys /var/adm/nvme_backup irixnvme.sw.base
+d 0755 root sys /var/sysgen/boot irixnvme.eoe.base
+f 0644 root sys /var/sysgen/boot/nvme.o.IP30 nvme.o.IP30 irixnvme.eoe.base mach(CPUBOARD=IP30||CPUBOARD=IP27) exitop(cp /var/sysgen/boot/nvme.o.IP30 /var/sysgen/boot/nvme.o)
+f 0644 root sys /var/sysgen/boot/nvme.o.IP32 nvme.o.IP32 irixnvme.eoe.base mach(CPUBOARD=IP32) exitop(cp /var/sysgen/boot/nvme.o.IP32 /var/sysgen/boot/nvme.o)
+f 0644 root sys /var/sysgen/boot/nvme.o.IP35 nvme.o.IP35 irixnvme.eoe.base mach(CPUBOARD=IP35) exitop(cp /var/sysgen/boot/nvme.o.IP35 /var/sysgen/boot/nvme.o)
+d 0755 root sys /var/sysgen/master.d irixnvme.sw.base
+f 0644 root sys /var/sysgen/master.d/nvme nvme.master irixnvme.sw.base exitop(cp /etc/init.d/nvme.init /etc/init.d/nvme 2>/dev/null; chmod 755 /etc/init.d/nvme; rm -f /etc/rc2.d/S05nvme; ln -s /etc/init.d/nvme /etc/rc2.d/S05nvme; /sbin/chkconfig -f nvme on; /etc/autoconfig; echo ""; echo "===================================="; echo "NVMe Driver Installation Complete!"; echo "===================================="; echo "Platform: `uname -m`"; echo "Reboot to activate the driver"; echo "") removeop(rm -f /var/sysgen/boot/nvme.o /etc/init.d/nvme /etc/rc2.d/S05nvme /etc/config/nvme; /sbin/chkconfig -f nvme off 2>/dev/null; /etc/autoconfig; echo ""; echo "===================================="; echo "        NVMe Driver Removed"; echo "===================================="; echo "REBOOT REQUIRED to activate new kernel"; echo "")
+d 0755 root sys /var/sysgen/system irixnvme.sw.base
+f 0644 root sys /var/sysgen/system/nvme.sm nvme.sm irixnvme.sw.base
+# NVMe Driver for IRIX - Tardist Image Database
+# Must be sorted on fields 5 and 6 (path and source)

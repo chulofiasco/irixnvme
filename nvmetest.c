@@ -1,5 +1,6 @@
 /*
  * nvmetest.c - IRIX SCSI test program for NVMe driver
+ * Version 0.9.6
  *
  * Tests various SCSI operations on the NVMe controller via hardware graph
  *
@@ -9,6 +10,8 @@
  * Compile: cc -o nvmetest nvmetest.c
  * Run as root: ./nvmetest [options]
  */
+
+#define NVMETEST_VERSION "0.9.6"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +42,33 @@
 /* Global flag for extended debug output */
 static int g_extended_debug = 0;
 
+/* Auto-detect NVMe controller number by scanning /hw/scsi_ctlr/ */
+/* Find the HIGHEST numbered controller (most recently added) that is accessible */
+static int find_nvme_controller(void)
+{
+    int ctlr;
+    int found = -1;
+    char path[256];
+    struct stat st;
+    int fd;
+    
+    /* Try controller numbers 0-99, remember the highest one that works */
+    for (ctlr = 0; ctlr < 100; ctlr++) {
+        /* Check if hwgraph entry exists */
+        snprintf(path, sizeof(path), "/hw/scsi_ctlr/%d/target/0/lun/0/scsi", ctlr);
+        if (stat(path, &st) == 0) {
+            /* Try to actually open the device to verify it's accessible */
+            fd = open(path, O_RDONLY);
+            if (fd >= 0) {
+                close(fd);
+                found = ctlr;  /* This one works, remember it */
+            }
+        }
+    }
+    
+    return found;
+}
+
 /* Test functions */
 void test_inquiry(int fd);
 void test_read_capacity(int fd);
@@ -55,9 +85,10 @@ static unsigned int rng_seed = 0;
 
 void usage(const char *progname)
 {
+    fprintf(stderr, "nvmetest v" NVMETEST_VERSION "\n");
     fprintf(stderr, "Usage: %s [options]\n", progname);
     fprintf(stderr, "Options:\n");
-    fprintf(stderr, "  -d PATH        Device path (default: %s)\n", DEFAULT_SCSI_PATH);
+    fprintf(stderr, "  -d PATH        Device path (if omitted, auto-detects NVMe controller)\n");
     fprintf(stderr, "  -x             Enable extended debug output\n");
     fprintf(stderr, "  -i             Test INQUIRY\n");
     fprintf(stderr, "  -c             Test READ CAPACITY\n");
@@ -70,11 +101,11 @@ void usage(const char *progname)
     fprintf(stderr, "  -a             Run all tests\n");
     fprintf(stderr, "  -h             Show this help\n");
     fprintf(stderr, "\nExamples:\n");
-    fprintf(stderr, "  %s -a                           # Run all basic tests\n", progname);
+    fprintf(stderr, "  %s -a                           # Auto-detect and run all tests\n", progname);
     fprintf(stderr, "  %s -x -i                        # INQUIRY with extended debug\n", progname);
     fprintf(stderr, "  %s -s 0 8192                    # Large read (4MB, tests PRP chaining)\n", progname);
     fprintf(stderr, "  %s -R 1000                      # Random write/read stress test\n", progname);
-    fprintf(stderr, "  %s -d /hw/scsi_ctlr/1/... -i   # Test different controller\n", progname);
+    fprintf(stderr, "  %s -d /hw/scsi_ctlr/1/... -i   # Test specific controller\n", progname);
     exit(1);
 }
 
@@ -98,7 +129,9 @@ int main(int argc, char *argv[])
     unsigned int count = 1;
     unsigned int count_write = 1;
     unsigned int random_iterations = 100;
-    const char *device_path = DEFAULT_SCSI_PATH;
+    const char *device_path = NULL;
+    char auto_path[256];
+    int auto_ctlr = -1;
 
     if (argc < 2) {
         usage(argv[0]);
@@ -166,6 +199,19 @@ int main(int argc, char *argv[])
 
     /* Set global debug flag */
     g_extended_debug = extended_debug;
+
+    /* Auto-detect controller if no device path specified */
+    if (device_path == NULL) {
+        auto_ctlr = find_nvme_controller();
+        if (auto_ctlr < 0) {
+            fprintf(stderr, "Error: Could not auto-detect NVMe controller\n");
+            fprintf(stderr, "Please specify device path with -d option\n");
+            exit(1);
+        }
+        snprintf(auto_path, sizeof(auto_path), "/hw/scsi_ctlr/%d/target/0/lun/0/scsi", auto_ctlr);
+        device_path = auto_path;
+        printf("Auto-detected controller %d\n", auto_ctlr);
+    }
 
     /* Open SCSI device */
     printf("Opening %s...\n", device_path);

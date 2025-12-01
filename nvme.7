@@ -1,0 +1,51 @@
+.TH nvme 7
+.SH NAME
+nvme \- NVMe storage driver for IRIX 6.5
+.SH SYNOPSIS
+.nf
+\fBml ld nvme.o\fR
+.SH DESCRIPTION
+.I nvme
+is a loadable kernel driver that provides support for NVMe storage
+devices on IRIX 6.5 systems. It implements a NVMe to SCSI translation
+layer, allowing NVMe SSDs to appear as SCSI devices for compatibility
+with existing IRIX disk utilities and filesystems.
+.PP
+The driver translates between the NVMe 1.0e specification and IRIX's
+SCSI subsystem, enabling modern solid-state storage to be used on
+vintage SGI systems through a PCI to PCIe bridge adapter.
+.SH FILES
+.TP
+.I /var/sysgen/boot/nvme.o
+Compiled driver module
+.TP
+.I /var/sysgen/master.d/nvme
+Master device configuration
+.TP
+.I /etc/init.d/nvme
+Init script for driver loading
+.TP
+.I /hw/scsi_ctlr/C/...
+Hardware graph nodes
+.TP
+.I /dev/dsk/dksXd0sN
+Block device nodes
+.TP
+.I /dev/rdsk/dksXd0sN
+Character device nodes
+.TP
+.I /var/adm/SYSLOG
+System log for driver messages
+.SH AUTHORS
+IRIX NVMe Driver Project
+.SH COPYRIGHT
+Copyright \(co 2024-2025 IRIX NVMe Driver Project.
+.br
+Licensed under the BSD 3-Clause License.
+.br
+This is free software; you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+.SH SEE ALSO
+.BR nvmetest (1M),
+.BR mkparts (1M),
+.BR ml (1M)

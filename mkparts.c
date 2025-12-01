@@ -1,5 +1,6 @@
 /*
  * mkparts.c - Create partition device nodes for a specific SCSI disk
+ * Version 0.9.4
  *
  * This utility creates partition device nodes for a single disk by
  * issuing a DIOCREADVOLHDR ioctl, which triggers the kernel to create
@@ -11,6 +12,8 @@
  *
  * This will create /dev/dsk/dks3d0s0, dks3d0s1, etc.
  */
+
+#define MKPARTS_VERSION "0.9.4"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,7 +74,7 @@ int main(int argc, char **argv)
     struct stat st;
 
     if (argc > 2 || (argc == 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "-?") == 0))) {
-        fprintf(stderr, "mkparts - Create NVMe partition device nodes\n");
+        fprintf(stderr, "mkparts v" MKPARTS_VERSION " - Create NVMe partition device nodes\n");
         fprintf(stderr, "\n");
         fprintf(stderr, "Usage: mkparts [controller_number]\n");
         fprintf(stderr, "       mkparts -h\n");
@@ -203,9 +206,9 @@ int main(int argc, char **argv)
             snprintf(partpath, sizeof(partpath), "/dev/dsk/dks%dd0s%d", ctlr, i);
             
             if (stat(partpath, &st) == 0) {
-                printf("  ✓ %s exists\n", partpath);
+                printf("  [OK] %s exists\n", partpath);
             } else {
-                printf("  ✗ %s MISSING\n", partpath);
+                printf("  [!!] %s MISSING\n", partpath);
             }
         }
     }

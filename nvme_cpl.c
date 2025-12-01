@@ -88,6 +88,8 @@ nvme_read_completion(nvme_completion_t *cpl, nvme_queue_t *q)
 
 #ifdef IP30
     heart_dcache_inval((caddr_t)src, sizeof(nvme_completion_t));
+#else
+    dki_dcache_inval((caddr_t)src, sizeof(nvme_completion_t));
 #endif
     dest[0] = NVME_MEMRD(&src[0]);
     dest[1] = NVME_MEMRD(&src[1]);
@@ -106,10 +108,15 @@ nvme_process_completions(nvme_soft_t *soft, nvme_queue_t *q)
     ushort_t status;
     ushort_t sq_head;
     int count = 0;
+    int max_iterations = q->size * 2;  /* Safety limit: process at most 2x queue size */
 
-    while (1) {
-        NVME_RD(soft, NVME_REG_CSTS); // make PCI bridge complete all DMA write transactions    
+    while (count < max_iterations) {
         mutex_lock(&q->lock, PZERO);
+        
+        /* Force PCI bridge to flush posted writes by doing an MMIO read.
+         * This ensures the completion queue entry in host memory is up-to-date
+         * before we check the phase bit. */
+        NVME_RD(soft, NVME_REG_CSTS);
 
         nvme_read_completion(&cpl, q);
 
@@ -139,6 +146,15 @@ nvme_process_completions(nvme_soft_t *soft, nvme_queue_t *q)
         mutex_unlock(&q->lock);
         /* Process this completion - calls sr_notify with NO locks held */
         status = cpl.dw3 >> 17; // bit 16 is phase
+        
+#ifdef NVME_IP32_DEBUG
+        {
+            ushort_t cid = cpl.dw3 & 0xFFFF;
+            cmn_err(CE_NOTE, "nvme: IP32 DEBUG: processing completion CID=%u status=0x%x sq_head=%u", 
+                    cid, status, sq_head);
+        }
+#endif
+        
         q->cpl_handler(soft, q, &cpl);
         count++;
 
@@ -147,6 +163,12 @@ nvme_process_completions(nvme_soft_t *soft, nvme_queue_t *q)
                 cpl.dw3 & 0xFFFF, status, sq_head, q->outstanding);
 #endif
         
+    }
+
+    /* Warn if we hit the safety limit (possible runaway completions) */
+    if (count >= max_iterations) {
+        cmn_err(CE_WARN, "nvme_process_completions: hit safety limit (%d iterations) on queue %d - possible hardware issue",
+                count, q->qid);
     }
 
     if (count) {
@@ -247,8 +269,7 @@ nvme_handle_admin_completion(nvme_soft_t *soft, nvme_queue_t *q, nvme_completion
 #ifdef NVME_DBG
         cmn_err(CE_NOTE, "nvme_handle_admin_completion: processing Identify Namespace");
 #endif
-#ifdef IP30
-        //heart_dcache_inval((caddr_t)soft->utility_buffer, sizeof(NBPP));
+#ifdef HEART_INVALIDATE_WAR
         heart_invalidate_war((caddr_t)soft->utility_buffer, sizeof(NBPP));
 #endif
         id_ns = (nvme_identify_namespace_t *)soft->utility_buffer;
