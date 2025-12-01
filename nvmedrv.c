@@ -81,6 +81,245 @@ nvme_log2(uint_t val)
     return shift;
 }
 
+#ifdef NVME_MULTI_QUEUE
+/*
+ * nvme_detect_cpu_count - Safely detect number of CPUs in the system
+ * 
+ * Returns: Number of CPUs (1-N), never 0 or negative
+ * 
+ * Note: Uses the 'numcpus' kernel variable (count of configured CPUs)
+ */
+
+/* Forward declaration for kernel's numcpus variable */
+extern int numcpus;  /* From <sys/pda.h> - count of configured CPUs */
+/* Note: cpuid() is a macro from <sys/pda.h>, not a function */
+
+static int
+nvme_detect_cpu_count(void)
+{
+    int cpus;
+    
+    /* Use IRIX kernel's numcpus variable (count of configured CPUs) */
+    cpus = numcpus;
+    
+    /* Sanity checks */
+    if (cpus < 1) {
+        cmn_err(CE_WARN, "nvme: numcpus=%d invalid, assuming 1 CPU", cpus);
+        cpus = 1;
+    }
+    
+    if (cpus > NVME_MAX_IO_QUEUES) {
+        cmn_err(CE_NOTE, "nvme: System has %d CPUs, limiting to %d queues",
+                cpus, NVME_MAX_IO_QUEUES);
+        cpus = NVME_MAX_IO_QUEUES;
+    }
+    
+    return cpus;
+}
+
+/*
+ * nvme_get_io_queue - Select I/O queue for current CPU
+ * 
+ * Returns: Pointer to appropriate I/O queue for current CPU
+ * 
+ * Critical: Must work correctly on single-CPU systems!
+ * Single-CPU fast path has minimal overhead.
+ */
+static __inline nvme_queue_t *
+nvme_get_io_queue(nvme_soft_t *soft)
+{
+    int cpu_id;
+    int queue_idx;
+    
+    /* Fast path: single queue (most common case on IP30) */
+    if (soft->num_io_queues == 1) {
+        return &soft->io_queue[0];
+    }
+    
+    /* Multi-queue path: map CPU to queue */
+    cpu_id = (int)cpuid();  /* IRIX kernel function - returns current CPU ID (0-based) */
+    
+    /* Sanity check CPU ID (paranoid safety) */
+    if (cpu_id < 0) {
+        cpu_id = 0;
+    }
+    
+    /* Round-robin if more CPUs than queues */
+    queue_idx = cpu_id % soft->num_io_queues;
+    
+    /* Bounds check (paranoid safety) */
+    if (queue_idx < 0 || queue_idx >= soft->num_io_queues) {
+        queue_idx = 0;
+    }
+    
+    return &soft->io_queue[queue_idx];
+}
+#endif /* NVME_MULTI_QUEUE */
+
+/*
+ * nvme_init_single_io_queue - Initialize one I/O queue pair
+ * 
+ * Arguments:
+ *   soft      - Driver state structure
+ *   queue_idx - Index in io_queue array (0-based)
+ *   qid       - NVMe queue ID (1-based, typically queue_idx + 1)
+ *   queue_size - Number of entries in the queue
+ * 
+ * Returns: 0 on success, -1 on failure
+ */
+static int
+nvme_init_single_io_queue(nvme_soft_t *soft, int queue_idx, int qid, uint_t queue_size)
+{
+    nvme_queue_t *q;
+    uint pages;
+    char mutex_name[32];
+    
+#ifdef NVME_MULTI_QUEUE
+    q = &soft->io_queue[queue_idx];
+#else
+    /* In single-queue mode, ignore queue_idx */
+    q = &soft->io_queue;
+#endif
+    
+    /* Allocate I/O submission queue */
+    pages = (uint)btoc(queue_size * NVME_SQ_ENTRY_SIZE);
+    q->sq = (nvme_command_t *)kvpalloc(pages,
+                                       VM_UNCACHED | VM_PHYSCONTIG | VM_DIRECT | VM_NOSLEEP,
+                                       0);
+    if (!q->sq) {
+#ifdef NVME_DBG
+        cmn_err(CE_WARN, "nvme: failed to allocate I/O SQ for queue %d", qid);
+#endif
+        return -1;
+    }
+    bzero(q->sq, pages * NBPP);
+    
+    /* Get physical address for I/O SQ */
+#ifdef NVME_UTILBUF_USEDMAP
+    q->sq_dmamap = pciio_dmamap_alloc(soft->pci_vhdl, NULL,
+                                      queue_size * NVME_SQ_ENTRY_SIZE,
+                                      PCIIO_DMA_CMD | DMATRANS64 | QUEUE_SWAP);
+    q->sq_phys = pciio_dmamap_addr(q->sq_dmamap,
+                                   kvtophys(q->sq),
+                                   queue_size * NVME_SQ_ENTRY_SIZE);
+#else
+    q->sq_phys = pciio_dmatrans_addr(soft->pci_vhdl, 0,
+                                     kvtophys(q->sq),
+                                     queue_size * NVME_SQ_ENTRY_SIZE,
+                                     PCIIO_DMA_CMD | DMATRANS64 | QUEUE_SWAP);
+#endif
+    
+    /* Allocate I/O completion queue */
+    pages = (uint)btoc(queue_size * NVME_CQ_ENTRY_SIZE);
+    q->cq = (nvme_completion_t *)kvpalloc(pages,
+                                          VM_UNCACHED | VM_PHYSCONTIG | VM_DIRECT | VM_NOSLEEP,
+                                          0);
+    if (!q->cq) {
+#ifdef NVME_DBG
+        cmn_err(CE_WARN, "nvme: failed to allocate I/O CQ for queue %d", qid);
+#endif
+        /* Free SQ before returning */
+        kvpfree(q->sq, (uint)btoc(queue_size * NVME_SQ_ENTRY_SIZE));
+        q->sq = NULL;
+        return -1;
+    }
+    bzero(q->cq, pages * NBPP);
+    
+    /* Get physical address for I/O CQ */
+#ifdef NVME_UTILBUF_USEDMAP
+    q->cq_dmamap = pciio_dmamap_alloc(soft->pci_vhdl, NULL,
+                                      queue_size * NVME_CQ_ENTRY_SIZE,
+                                      PCIIO_DMA_CMD | DMATRANS64 | QUEUE_SWAP);
+    q->cq_phys = pciio_dmamap_addr(q->cq_dmamap,
+                                   kvtophys(q->cq),
+                                   queue_size * NVME_CQ_ENTRY_SIZE);
+#else
+    q->cq_phys = pciio_dmatrans_addr(soft->pci_vhdl, 0,
+                                     kvtophys(q->cq),
+                                     queue_size * NVME_CQ_ENTRY_SIZE,
+                                     PCIIO_DMA_CMD | DMATRANS64 | QUEUE_SWAP);
+#endif
+    
+    /* Initialize I/O queue state */
+    q->qid = qid;
+    q->size = queue_size;
+    q->size_mask = queue_size - 1;
+    q->size_shift = nvme_log2(queue_size);
+    q->sq_head = 0;
+    q->sq_tail = 0;
+    q->cq_head = q->size;  /* Start with phase = 1 */
+    
+    /* Calculate doorbell register addresses */
+    q->sq_doorbell = 0x1000 + (2 * qid * soft->doorbell_stride);
+    q->cq_doorbell = 0x1000 + ((2 * qid + 1) * soft->doorbell_stride);
+    q->vector = 0;
+    q->cpl_handler = nvme_handle_io_completion;
+    q->outstanding = 0;
+    q->watchdog_id = 0;
+    q->watchdog_active = 0;
+    
+    /* Command batching disabled (causes performance regression and complexity) */
+    q->batch_mode = 0;      /* 0 = disabled, immediate doorbell */
+    q->batch_count = 0;
+    q->batch_max = 4;       /* Kept for potential future use */
+    
+    /* qlfc-style queue space tracking: Start with all slots available minus one
+     * (we keep one slot reserved to distinguish full from empty) */
+    q->queue_space = queue_size - 1;
+    
+    /* Create mutex with unique name */
+#ifdef NVME_MULTI_QUEUE
+    sprintf(mutex_name, "nvme_io_%d", queue_idx);
+#else
+    sprintf(mutex_name, "nvme_io");
+#endif
+    init_mutex(&q->lock, MUTEX_DEFAULT, mutex_name, 0);
+    
+    return 0;
+}
+
+/*
+ * nvme_free_single_io_queue - Free memory for one I/O queue pair
+ * 
+ * Arguments:
+ *   soft      - Driver state structure
+ *   queue_idx - Index in io_queue array (0-based)
+ */
+static void
+nvme_free_single_io_queue(nvme_soft_t *soft, int queue_idx)
+{
+    nvme_queue_t *q;
+    
+#ifdef NVME_MULTI_QUEUE
+    q = &soft->io_queue[queue_idx];
+#else
+    q = &soft->io_queue;
+#endif
+    
+    mutex_destroy(&q->lock);
+    
+#ifdef NVME_UTILBUF_USEDMAP
+    if (q->cq_dmamap) {
+        pciio_dmamap_free(q->cq_dmamap);
+        q->cq_dmamap = NULL;
+    }
+    if (q->sq_dmamap) {
+        pciio_dmamap_free(q->sq_dmamap);
+        q->sq_dmamap = NULL;
+    }
+#endif
+    
+    if (q->cq) {
+        kvpfree(q->cq, (uint)btoc(q->size * NVME_CQ_ENTRY_SIZE));
+        q->cq = NULL;
+    }
+    
+    if (q->sq) {
+        kvpfree(q->sq, (uint)btoc(q->size * NVME_SQ_ENTRY_SIZE));
+        q->sq = NULL;
+    }
+}
+
 /*
  * nvme_scan_ctlr_callback - Callback for scaninvent() to find max controller number
  */
@@ -191,12 +430,20 @@ nvme_error_handler(void *einfo, int error_code, ioerror_mode_t mode, ioerror_t *
 void
 nvme_init(void)
 {
+#ifndef IP35
     vnode_t *vp;
     int error;
     char buf[16];
     ssize_t len;
+#endif
     
-    /* Check if verbose mode is enabled by reading /etc/config/verbose */
+    /* Always display initialization message for troubleshooting */
+    cmn_err(CE_NOTE, "nvme_init: NVMe driver for IRIX initializing, Version 0.9.18");
+    
+#ifndef IP35
+    /* Check if verbose mode is enabled by reading /etc/config/verbose
+     * Note: Disabled on IP35 - file I/O during module init triggers
+     * pm_get_pagesize crash as NUMA subsystem isn't ready yet */
     nvme_verbose = 0;  /* Default to quiet */
     error = lookupname("/etc/config/verbose", UIO_SYSSPACE, NO_FOLLOW, NULLVPP, &vp, NULL);
     if (error == 0) {
@@ -224,11 +471,16 @@ nvme_init(void)
         }
         VN_RELE(vp);
     }
+#else
+    /* IP35: Can't read files during module init (NUMA/PM not ready)
+     * Verbose mode defaults to 0 (quiet) but can be enabled via:
+     *   1. Kernel tunable: systune nvme_verbose 1
+     *   2. Boot option: add 'nvme_verbose=1' to /var/sysgen/master.d/nvme
+     * The global nvme_verbose variable can be modified at runtime */
+    nvme_verbose = 0;
+    cmn_err(CE_NOTE, "nvme_init: verbose mode = %d (set nvme_verbose=1 for detailed messages)", nvme_verbose);
+#endif
     
-    if (nvme_verbose) {
-        cmn_err(CE_NOTE, "nvme_init: NVMe driver for IRIX initializing");
-    }
-
     /* If we are already registered, this is a reload */
     pciio_iterate("nvme_", nvme_reloadme);
 }
@@ -950,12 +1202,20 @@ nvme_initialize(nvme_soft_t *soft)
     }
     bzero(soft->admin_queue.sq, pages * NBPP);
 
-
-    /* Get physical address for SQ - use pciio_dmatrans_addr for proper PCI DMA mapping */
+    /* Get physical address for SQ - use DMA map on IP30/IP35 */
+#ifdef NVME_UTILBUF_USEDMAP
+    soft->admin_queue.sq_dmamap = pciio_dmamap_alloc(soft->pci_vhdl, NULL,
+                                                     queue_size * NVME_SQ_ENTRY_SIZE,
+                                                     PCIIO_DMA_CMD | DMATRANS64 | QUEUE_SWAP);
+    soft->admin_queue.sq_phys = pciio_dmamap_addr(soft->admin_queue.sq_dmamap,
+                                                  kvtophys(soft->admin_queue.sq),
+                                                  queue_size * NVME_SQ_ENTRY_SIZE);
+#else
     soft->admin_queue.sq_phys = pciio_dmatrans_addr(soft->pci_vhdl, 0,
                                                     kvtophys(soft->admin_queue.sq),
                                                     queue_size * NVME_SQ_ENTRY_SIZE,
                                                     PCIIO_DMA_CMD | DMATRANS64 | QUEUE_SWAP);
+#endif
 
     /* Allocate completion queue */
     pages = (uint)btoc(queue_size * NVME_CQ_ENTRY_SIZE);
@@ -970,11 +1230,20 @@ nvme_initialize(nvme_soft_t *soft)
     }
     bzero(soft->admin_queue.cq, pages * NBPP);
 
-    /* Get physical address for CQ - use pciio_dmatrans_addr for proper PCI DMA mapping */
+    /* Get physical address for CQ - use DMA map on IP30/IP35 */
+#ifdef NVME_UTILBUF_USEDMAP
+    soft->admin_queue.cq_dmamap = pciio_dmamap_alloc(soft->pci_vhdl, NULL,
+                                                     queue_size * NVME_CQ_ENTRY_SIZE,
+                                                     PCIIO_DMA_CMD | DMATRANS64 | QUEUE_SWAP);
+    soft->admin_queue.cq_phys = pciio_dmamap_addr(soft->admin_queue.cq_dmamap,
+                                                  kvtophys(soft->admin_queue.cq),
+                                                  queue_size * NVME_CQ_ENTRY_SIZE);
+#else
     soft->admin_queue.cq_phys = pciio_dmatrans_addr(soft->pci_vhdl, 0,
                                                     kvtophys(soft->admin_queue.cq),
                                                     queue_size * NVME_CQ_ENTRY_SIZE,
                                                     PCIIO_DMA_CMD | DMATRANS64 | QUEUE_SWAP);
+#endif
 
     /* Initialize queue state */
     soft->admin_queue.qid = 0;
@@ -992,74 +1261,93 @@ nvme_initialize(nvme_soft_t *soft)
     soft->admin_queue.outstanding = 0;
     soft->admin_queue.watchdog_id = 0;
     soft->admin_queue.watchdog_active = 0;
+    
+    /* qlfc-style queue space tracking for admin queue */
+    soft->admin_queue.queue_space = queue_size - 1;
 
     init_mutex(&soft->admin_queue.lock, MUTEX_DEFAULT, "nvme_admin", 0);
 
     /*
-     * Allocate I/O queue
+     * Allocate I/O queue(s)
+     * 
+     * Multi-queue mode (NVME_MULTI_QUEUE):
+     *   - Detects CPU count and creates 1-N queues
+     *   - Single-CPU systems get 1 queue (no overhead)
+     *   - Multi-CPU systems get N queues (up to NVME_MAX_IO_QUEUES)
+     *   - Falls back gracefully if queue creation fails
+     * 
+     * Single-queue mode (default):
+     *   - Always creates exactly 1 queue (qid=1)
      */
     queue_size = NVME_IO_QUEUE_SIZE;
     if (queue_size > soft->max_queue_entries) {
         queue_size = soft->max_queue_entries;
     }
 
-    /* Allocate I/O submission queue */
-    pages = (uint)btoc(queue_size * NVME_SQ_ENTRY_SIZE);
-    soft->io_queue.sq = (nvme_command_t *)kvpalloc(pages,
-                                                    VM_UNCACHED | VM_PHYSCONTIG | VM_DIRECT | VM_NOSLEEP,
-                                                    0);
-    if (!soft->io_queue.sq) {
-#ifdef NVME_DBG
-        cmn_err(CE_WARN, "nvme: failed to allocate I/O SQ");
-#endif
+#ifdef NVME_MULTI_QUEUE
+    {
+        int cpu_count;
+        int desired_queues;
+        int i;
+        int rc;
+        
+        /* Detect CPU count and determine optimal queue count */
+        cpu_count = nvme_detect_cpu_count();
+        
+        /* Single CPU? No benefit from multiple queues */
+        if (cpu_count == 1) {
+            desired_queues = 1;
+            cmn_err(CE_NOTE, "nvme: Single CPU detected, using 1 I/O queue");
+        } else {
+            /* Start with 1 queue per CPU, capped at our maximum */
+            desired_queues = cpu_count;
+            if (desired_queues > NVME_MAX_IO_QUEUES) {
+                cmn_err(CE_NOTE, "nvme: Limiting queues from %d to %d (NVME_MAX_IO_QUEUES)",
+                        desired_queues, NVME_MAX_IO_QUEUES);
+                desired_queues = NVME_MAX_IO_QUEUES;
+            }
+            cmn_err(CE_NOTE, "nvme: Planning to create %d I/O queue pair(s) for %d CPU(s)",
+                    desired_queues, cpu_count);
+        }
+        
+        /* Try to create requested number of queues */
+        soft->num_io_queues = 0;
+        for (i = 0; i < desired_queues; i++) {
+            rc = nvme_init_single_io_queue(soft, i, i + 1, queue_size);  /* qid = i+1 (1-based) */
+            
+            if (rc != 0) {
+                cmn_err(CE_WARN, "nvme: Failed to allocate I/O queue %d", i + 1);
+                
+                /* First queue is critical - cannot continue */
+                if (i == 0) {
+                    cmn_err(CE_WARN, "nvme: Cannot create any I/O queues - FATAL");
+                    goto err_free_admin_cq;
+                }
+                
+                /* Partial success - use what we have */
+                cmn_err(CE_NOTE, "nvme: Using %d of %d requested queue(s)", 
+                        soft->num_io_queues, desired_queues);
+                break;
+            }
+            
+            soft->num_io_queues++;
+        }
+        
+        /* Success message */
+        if (soft->num_io_queues == 1) {
+            cmn_err(CE_NOTE, "nvme: Allocated 1 I/O queue pair (qid=1)");
+        } else {
+            cmn_err(CE_NOTE, "nvme: Allocated %d I/O queue pairs (qid=1-%d) for %d CPU(s)",
+                    soft->num_io_queues, soft->num_io_queues, cpu_count);
+        }
+    }
+#else
+    /* Single-queue mode: Create one I/O queue (qid=1) */
+    if (nvme_init_single_io_queue(soft, 0, 1, queue_size) != 0) {
         goto err_free_admin_cq;
     }
-    bzero(soft->io_queue.sq, pages * NBPP);
-
-    /* Get physical address for I/O SQ - use pciio_dmatrans_addr for proper PCI DMA mapping */
-    soft->io_queue.sq_phys = pciio_dmatrans_addr(soft->pci_vhdl, 0,
-                                                  kvtophys(soft->io_queue.sq),
-                                                  queue_size * NVME_SQ_ENTRY_SIZE,
-                                                  PCIIO_DMA_CMD | DMATRANS64 | QUEUE_SWAP);
-
-    /* Allocate I/O completion queue */
-    pages = (uint)btoc(queue_size * NVME_CQ_ENTRY_SIZE);
-    soft->io_queue.cq = (nvme_completion_t *)kvpalloc(pages,
-                                                       VM_UNCACHED | VM_PHYSCONTIG | VM_DIRECT | VM_NOSLEEP,
-                                                       0);
-    if (!soft->io_queue.cq) {
-#ifdef NVME_DBG
-        cmn_err(CE_WARN, "nvme: failed to allocate I/O CQ");
+    cmn_err(CE_NOTE, "nvme: Allocated 1 I/O queue pair (qid=1)");
 #endif
-        goto err_free_io_sq;
-    }
-    bzero(soft->io_queue.cq, pages * NBPP);
-
-    /* Get physical address for I/O CQ - use pciio_dmatrans_addr for proper PCI DMA mapping */
-    soft->io_queue.cq_phys = pciio_dmatrans_addr(soft->pci_vhdl, 0,
-                                                  kvtophys(soft->io_queue.cq),
-                                                  queue_size * NVME_CQ_ENTRY_SIZE,
-                                                  PCIIO_DMA_CMD | DMATRANS64 | QUEUE_SWAP);
-
-    /* Initialize I/O queue state */
-    soft->io_queue.qid = 1;
-    soft->io_queue.size = queue_size;
-    soft->io_queue.size_mask = queue_size - 1;
-    soft->io_queue.size_shift = nvme_log2(queue_size);  /* For phase bit extraction */
-    soft->io_queue.sq_head = 0;
-    soft->io_queue.sq_tail = 0;
-    soft->io_queue.cq_head = soft->io_queue.size;  /* Start with phase = 1 */
-
-    /* Calculate doorbell register addresses (qid=1 for I/O) */
-    soft->io_queue.sq_doorbell = 0x1000 + (2 * 1 * soft->doorbell_stride);
-    soft->io_queue.cq_doorbell = 0x1000 + ((2 * 1 + 1) * soft->doorbell_stride);
-    soft->io_queue.vector = 0;
-    soft->io_queue.cpl_handler = nvme_handle_io_completion;
-    soft->io_queue.outstanding = 0;
-    soft->io_queue.watchdog_id = 0;
-    soft->io_queue.watchdog_active = 0;
-
-    init_mutex(&soft->io_queue.lock, MUTEX_DEFAULT, "nvme_io", 0);
 
     /*
      * Initialize I/O command tracking
@@ -1142,9 +1430,20 @@ nvme_initialize(nvme_soft_t *soft)
     cmn_err(CE_NOTE, "nvme: allocated admin queue (size=%u, shift=%u) at phys SQ=%llx CQ=%llx",
             soft->admin_queue.size, soft->admin_queue.size_shift,
             soft->admin_queue.sq_phys, soft->admin_queue.cq_phys);
+#ifdef NVME_MULTI_QUEUE
+    {
+        int i;
+        for (i = 0; i < soft->num_io_queues; i++) {
+            cmn_err(CE_NOTE, "nvme: allocated I/O queue %d (size=%u, shift=%u) at phys SQ=%llx CQ=%llx",
+                    i, soft->io_queue[i].size, soft->io_queue[i].size_shift,
+                    soft->io_queue[i].sq_phys, soft->io_queue[i].cq_phys);
+        }
+    }
+#else
     cmn_err(CE_NOTE, "nvme: allocated I/O queue (size=%u, shift=%u) at phys SQ=%llx CQ=%llx",
             soft->io_queue.size, soft->io_queue.size_shift,
             soft->io_queue.sq_phys, soft->io_queue.cq_phys);
+#endif
 #endif
     /*
      * Configure controller
@@ -1240,19 +1539,67 @@ nvme_initialize(nvme_soft_t *soft)
 #ifndef NVME_COMPLETION_MANUAL
     nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
 #endif
-    if (!nvme_admin_create_cq(soft, soft->io_queue.qid, soft->io_queue.size,
-                              soft->io_queue.cq_phys, soft->io_queue.vector)) {
-        goto err_free_utility_buffer;
-    }
+
+    /*
+     * Create I/O queue pairs with the controller
+     * 
+     * Multi-queue mode: Create all allocated queues (1-N)
+     * Single-queue mode: Create only one queue (qid=1)
+     */
+#ifdef NVME_MULTI_QUEUE
+    {
+        int i;
+        nvme_queue_t *q;
+        
+        for (i = 0; i < soft->num_io_queues; i++) {
+            q = &soft->io_queue[i];
+            
+            /* Create Completion Queue first */
+            if (!nvme_admin_create_cq(soft, q->qid, q->size, q->cq_phys, q->vector)) {
+                cmn_err(CE_WARN, "nvme: Failed to create I/O CQ %d with controller", q->qid);
+                goto err_free_utility_buffer;
+            }
 #ifndef NVME_COMPLETION_MANUAL
-    nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
+            nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
 #endif
-    if (!nvme_admin_create_sq(soft, soft->io_queue.qid, soft->io_queue.size,
-                              soft->io_queue.sq_phys, soft->io_queue.qid)) {
-        goto err_free_utility_buffer;
-    }
+            
+            /* Create Submission Queue second */
+            if (!nvme_admin_create_sq(soft, q->qid, q->size, q->sq_phys, q->qid)) {
+                cmn_err(CE_WARN, "nvme: Failed to create I/O SQ %d with controller", q->qid);
+                goto err_free_utility_buffer;
+            }
 #ifndef NVME_COMPLETION_MANUAL
-    nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
+            nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
+#endif
+        }
+        
+        if (soft->num_io_queues == 1) {
+            cmn_err(CE_NOTE, "nvme: Created 1 I/O queue pair with controller (qid=1)");
+        } else {
+            cmn_err(CE_NOTE, "nvme: Created %d I/O queue pairs with controller (qid=1-%d)",
+                    soft->num_io_queues, soft->num_io_queues);
+        }
+    }
+#else
+    /* Single-queue mode: Create one queue (qid=1) */
+    {
+        nvme_queue_t *q = &soft->io_queue;
+        
+        if (!nvme_admin_create_cq(soft, q->qid, q->size, q->cq_phys, q->vector)) {
+            goto err_free_utility_buffer;
+        }
+#ifndef NVME_COMPLETION_MANUAL
+        nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
+#endif
+        if (!nvme_admin_create_sq(soft, q->qid, q->size, q->sq_phys, q->qid)) {
+            goto err_free_utility_buffer;
+        }
+#ifndef NVME_COMPLETION_MANUAL
+        nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
+#endif
+        
+        cmn_err(CE_NOTE, "nvme: Created 1 I/O queue pair with controller (qid=1)");
+    }
 #endif
 
     /* Query controller features to discover capabilities */
@@ -1261,23 +1608,23 @@ nvme_initialize(nvme_soft_t *soft)
         /* Non-fatal - continue initialization even if feature query fails */
     }
 
-    /* Configure interrupt coalescing if supported
-     * Coalesce after 10 completions OR 500 microseconds (whichever comes first)
-     * Time calculation: 10 × 4KB reads over 33MHz PCI ≈ 400us, use 500us for margin
-     * CDW11 format: Threshold (7:0), Time (31:8) in 100us units */
-    if (soft->features[NVME_FEAT_INTERRUPT_COALESCING]) {
-        uint_t coalesce_value = 10 | (5 << 8);  /* 10 completions, 500us (5 × 100us) */
-
-        if (nvme_admin_set_features(soft, NVME_FEAT_INTERRUPT_COALESCING, coalesce_value)) {
+    /* Configure interrupt coalescing for better IOPS efficiency
+     * TUNED FOR SMALL FILES: Prevents CID exhaustion during many concurrent
+     * small file operations (cp -r, tar, etc.)
+     * 
+     * Threshold: 4 completions OR 50μs timeout
+     * - Lower threshold (4) means faster CID recycling
+     * - Shorter timeout (50μs) reduces worst-case latency
+     * - Trade: Slightly more interrupts, but prevents hangs on small file workloads
+     * 
+     * Expected impact: +5-10% IOPS for sequential, prevents hangs on random small files */
+    if (nvme_set_interrupt_coalescing(soft, 4, 0)) {  /* 4 completions, 0 = 50μs */
 #ifndef NVME_COMPLETION_MANUAL
-            nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
+        nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
 #endif
-            if (nvme_verbose) {
-                cmn_err(CE_NOTE, "nvme: Interrupt coalescing configured (10 completions, 500us)");
-            }
-        } else {
-            cmn_err(CE_WARN, "nvme: Failed to configure interrupt coalescing");
-        }
+        cmn_err(CE_NOTE, "nvme: Interrupt coalescing enabled (4 completions or 50us)");
+    } else {
+        cmn_err(CE_WARN, "nvme: Failed to configure interrupt coalescing (continuing without)");
     }
 
     /* Start timeout watchdog for checking hung commands */
@@ -1308,27 +1655,38 @@ err_free_prp_pool:
 
 err_destroy_io_locks:
     mutex_destroy(&soft->io_requests_lock);
-    mutex_destroy(&soft->io_queue.lock);
 
-    if (soft->io_queue.cq) {
-        kvpfree(soft->io_queue.cq, (uint)btoc(soft->io_queue.size * NVME_CQ_ENTRY_SIZE));
-        soft->io_queue.cq = NULL;
+#ifdef NVME_MULTI_QUEUE
+    {
+        int i;
+        for (i = 0; i < soft->num_io_queues; i++) {
+            nvme_free_single_io_queue(soft, i);
+        }
     }
-
-err_free_io_sq:
-    if (soft->io_queue.sq) {
-        kvpfree(soft->io_queue.sq, (uint)btoc(soft->io_queue.size * NVME_SQ_ENTRY_SIZE));
-        soft->io_queue.sq = NULL;
-    }
+#else
+    nvme_free_single_io_queue(soft, 0);
+#endif
 
 err_free_admin_cq:
     mutex_destroy(&soft->admin_queue.lock);
+#ifdef NVME_UTILBUF_USEDMAP
+    if (soft->admin_queue.cq_dmamap) {
+        pciio_dmamap_free(soft->admin_queue.cq_dmamap);
+        soft->admin_queue.cq_dmamap = NULL;
+    }
+#endif
     if (soft->admin_queue.cq) {
         kvpfree(soft->admin_queue.cq, (uint)btoc(soft->admin_queue.size * NVME_CQ_ENTRY_SIZE));
         soft->admin_queue.cq = NULL;
     }
 
 err_free_admin_sq:
+#ifdef NVME_UTILBUF_USEDMAP
+    if (soft->admin_queue.sq_dmamap) {
+        pciio_dmamap_free(soft->admin_queue.sq_dmamap);
+        soft->admin_queue.sq_dmamap = NULL;
+    }
+#endif
     if (soft->admin_queue.sq) {
         kvpfree(soft->admin_queue.sq, (uint)btoc(soft->admin_queue.size * NVME_SQ_ENTRY_SIZE));
         soft->admin_queue.sq = NULL;
@@ -1415,12 +1773,30 @@ nvme_shutdown(nvme_soft_t *soft)
 
     /* Wait for any in-flight I/O commands to complete (5 second timeout) */
 #ifdef NVME_DBG
-    cmn_err(CE_NOTE, "nvme: waiting for I/O queue to drain");
+    cmn_err(CE_NOTE, "nvme: waiting for I/O queue(s) to drain");
 #endif
+#ifdef NVME_MULTI_QUEUE
+    {
+        int i;
+        for (i = 0; i < soft->num_io_queues; i++) {
+            nvme_wait_for_queue_idle(soft, &soft->io_queue[i], 5000);
+        }
+    }
+#else
     nvme_wait_for_queue_idle(soft, &soft->io_queue, 5000);
+#endif
 
     /* Stop completion watchdog timers */
+#ifdef NVME_MULTI_QUEUE
+    {
+        int i;
+        for (i = 0; i < soft->num_io_queues; i++) {
+            nvme_watchdog_stop(&soft->io_queue[i]);
+        }
+    }
+#else
     nvme_watchdog_stop(&soft->io_queue);
+#endif
     nvme_watchdog_stop(&soft->admin_queue);
 
     /*
@@ -1431,6 +1807,36 @@ nvme_shutdown(nvme_soft_t *soft)
      * 3. Delete I/O Completion Queue
      * 4. Wait for completion
      */
+#ifdef NVME_MULTI_QUEUE
+    {
+        int i;
+        for (i = soft->num_io_queues - 1; i >= 0; i--) {  /* Delete in reverse order */
+#ifdef NVME_DBG
+            cmn_err(CE_NOTE, "nvme: deleting I/O submission queue %d", soft->io_queue[i].qid);
+#endif
+            if (nvme_admin_delete_sq(soft, soft->io_queue[i].qid)) {
+                nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
+#ifdef NVME_DBG
+                cmn_err(CE_NOTE, "nvme: I/O submission queue %d deleted", soft->io_queue[i].qid);
+#endif
+            } else {
+                cmn_err(CE_WARN, "nvme: failed to delete I/O submission queue %d", soft->io_queue[i].qid);
+            }
+
+#ifdef NVME_DBG
+            cmn_err(CE_NOTE, "nvme: deleting I/O completion queue %d", soft->io_queue[i].qid);
+#endif
+            if (nvme_admin_delete_cq(soft, soft->io_queue[i].qid)) {
+                nvme_wait_for_queue_idle(soft, &soft->admin_queue, 5000);
+#ifdef NVME_DBG
+                cmn_err(CE_NOTE, "nvme: I/O completion queue %d deleted", soft->io_queue[i].qid);
+#endif
+            } else {
+                cmn_err(CE_WARN, "nvme: failed to delete I/O completion queue %d", soft->io_queue[i].qid);
+            }
+        }
+    }
+#else
 #ifdef NVME_DBG
     cmn_err(CE_NOTE, "nvme: deleting I/O submission queue");
 #endif
@@ -1454,6 +1860,7 @@ nvme_shutdown(nvme_soft_t *soft)
     } else {
         cmn_err(CE_WARN, "nvme: failed to delete I/O completion queue");
     }
+#endif
 
     /* Request clean shutdown via CC register */
 #ifdef NVME_DBG
@@ -1516,7 +1923,15 @@ nvme_shutdown(nvme_soft_t *soft)
     pciio_dmamap_free(soft->utility_buffer_dmamap);
 #endif
 
-    /* Free I/O queue */
+    /* Free I/O queue(s) */
+#ifdef NVME_MULTI_QUEUE
+    {
+        int i;
+        for (i = 0; i < soft->num_io_queues; i++) {
+            nvme_free_single_io_queue(soft, i);
+        }
+    }
+#else
     if (soft->io_queue.sq) {
         kvpfree(soft->io_queue.sq, (uint)btoc(soft->io_queue.size * NVME_SQ_ENTRY_SIZE));
         soft->io_queue.sq = NULL;
@@ -1526,12 +1941,25 @@ nvme_shutdown(nvme_soft_t *soft)
         soft->io_queue.cq = NULL;
     }
     mutex_destroy(&soft->io_queue.lock);
+#endif
 
     /* Free admin queue */
+#ifdef NVME_UTILBUF_USEDMAP
+    if (soft->admin_queue.sq_dmamap) {
+        pciio_dmamap_free(soft->admin_queue.sq_dmamap);
+        soft->admin_queue.sq_dmamap = NULL;
+    }
+#endif
     if (soft->admin_queue.sq) {
         kvpfree(soft->admin_queue.sq, (uint)btoc(soft->admin_queue.size * NVME_SQ_ENTRY_SIZE));
         soft->admin_queue.sq = NULL;
     }
+#ifdef NVME_UTILBUF_USEDMAP
+    if (soft->admin_queue.cq_dmamap) {
+        pciio_dmamap_free(soft->admin_queue.cq_dmamap);
+        soft->admin_queue.cq_dmamap = NULL;
+    }
+#endif
     if (soft->admin_queue.cq) {
         kvpfree(soft->admin_queue.cq, (uint)btoc(soft->admin_queue.size * NVME_CQ_ENTRY_SIZE));
         soft->admin_queue.cq = NULL;
@@ -1564,11 +1992,30 @@ nvme_intr(
     if (!soft || !soft->initialized) {
         return;
     }
+
+#ifdef NVME_IP32_DEBUG
+    /* Log interrupt entry - critical for IP32 debugging */
+    atomicAddInt(&nvme_intcount, 1);
+    if ((nvme_intcount % 100) == 1) {  /* Log every 100th interrupt to avoid flooding */
+        cmn_err(CE_NOTE, "nvme: IP32 DEBUG: interrupt #%d received", nvme_intcount);
+    }
+#endif
+
     /* Process admin queue completions */
     admin_processed = nvme_process_completions(soft, &soft->admin_queue);
 
     /* Process I/O queue completions */
+#ifdef NVME_MULTI_QUEUE
+    {
+        int i;
+        io_processed = 0;
+        for (i = 0; i < soft->num_io_queues; i++) {
+            io_processed += nvme_process_completions(soft, &soft->io_queue[i]);
+        }
+    }
+#else
     io_processed = nvme_process_completions(soft, &soft->io_queue);
+#endif
 
 #ifdef NVME_DBG_EXTRA
     /* Debug: log if we actually processed something */
@@ -1787,13 +2234,13 @@ nvme_attach(vertex_hdl_t conn)
         /* Not an NVMe device, silently ignore */
         return -1;
     }
-    nvme_dev_counter++;
+nvme_dev_counter++;
 
-    /* This is an NVMe device! */
-    if (nvme_verbose) {
-        cmn_err(CE_NOTE, "nvme_attach: found NVMe device %04x:%04x (class %06x) at conn 0x%x",
-                vendor_id, device_id, class_code, conn);
-    }
+/* This is an NVMe device! */
+if (nvme_verbose) {
+    cmn_err(CE_NOTE, "nvme_attach: found NVMe device %04x:%04x (class %06x) at conn 0x%x (driver v0.9.17)",
+            vendor_id, device_id, class_code, conn);
+}
 
 #ifdef NVME_DBG
     /* Dump the bridge configuration of the parent (if it's a bridge) to understand topology */
@@ -2006,9 +2453,7 @@ nvme_attach(vertex_hdl_t conn)
         /* Get PCI slot number for logging */
         slot = pciio_info_slot_get(pciioinfo);
 
-        /* Find next available adapter number by scanning inventory 
-           FIXME - let ioconfig do it for us and use ioctl?
-        */
+        /* Find next available adapter number by scanning inventory */
         soft->adap = nvme_get_next_adapter_num();
 
         if (nvme_verbose) {
@@ -2399,7 +2844,17 @@ nvme_poll_thread(void *arg)
 
             /* Process completions */
             admin_processed = nvme_process_completions(soft, &soft->admin_queue);
+#ifdef NVME_MULTI_QUEUE
+            {
+                int i;
+                io_processed = 0;
+                for (i = 0; i < soft->num_io_queues; i++) {
+                    io_processed += nvme_process_completions(soft, &soft->io_queue[i]);
+                }
+            }
+#else
             io_processed = nvme_process_completions(soft, &soft->io_queue);
+#endif
 
 #ifdef NVME_DBG
             if (admin_processed || io_processed) {
@@ -2509,7 +2964,11 @@ nvme_stop_poll_thread(nvme_soft_t *soft)
 void
 nvme_watchdog_timeout(nvme_soft_t *soft)
 {
+#ifdef NVME_MULTI_QUEUE
+    nvme_queue_t *q = &soft->io_queue[0];  /* Use first queue for compatibility */
+#else
     nvme_queue_t *q = &soft->io_queue;
+#endif
     int num_completions;
 
     /* Clear the active flag atomically */
@@ -2621,7 +3080,11 @@ void
 nvme_check_timeouts(nvme_soft_t *soft)
 {
     time_t now = lbolt;
+#ifdef NVME_MULTI_QUEUE
+    nvme_queue_t *q = &soft->io_queue[0];  /* Use first queue for compatibility */
+#else
     nvme_queue_t *q = &soft->io_queue;
+#endif
     int cid, i;
     scsi_request_t *req;
     time_t elapsed;
@@ -2721,8 +3184,6 @@ nvme_check_timeouts(nvme_soft_t *soft)
 void
 nvme_timeout_watchdog_handler(nvme_soft_t *soft)
 {
-    nvme_queue_t *q = &soft->io_queue;
-
     /* Clear the active flag atomically */
     if (!compare_and_swap_int((int *)&soft->timeout_watchdog_active, 1, 0)) {
         /* Watchdog was already cancelled or not active */

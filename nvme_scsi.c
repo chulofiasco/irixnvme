@@ -7,6 +7,52 @@
 
 #include "nvmedrv.h"
 
+/* Note: For multi-queue, cpuid() macro is provided by <sys/pda.h> included in nvmedrv.h */
+
+/*
+ * nvme_scsi_select_io_queue - Select I/O queue for current operation
+ * 
+ * Multi-queue mode: Returns queue based on current CPU
+ * Single-queue mode: Returns the single I/O queue
+ * 
+ * Critical: Works correctly on single-CPU systems!
+ */
+static __inline nvme_queue_t *
+nvme_scsi_select_io_queue(nvme_soft_t *soft)
+{
+#ifdef NVME_MULTI_QUEUE
+    int cpu_id;
+    int queue_idx;
+    
+    /* Fast path: single queue (most common case on single-CPU) */
+    if (soft->num_io_queues == 1) {
+        return &soft->io_queue[0];
+    }
+    
+    /* Multi-queue path: map CPU to queue */
+    cpu_id = (int)cpuid();  /* IRIX kernel function - returns current CPU ID (0-based) */
+    
+    /* Sanity check CPU ID (paranoid safety) */
+    if (cpu_id < 0) {
+        cpu_id = 0;
+    }
+    
+    /* Round-robin if more CPUs than queues */
+    queue_idx = cpu_id % soft->num_io_queues;
+    
+    /* Bounds check (paranoid safety) */
+    if (queue_idx < 0 || queue_idx >= soft->num_io_queues) {
+        queue_idx = 0;
+    }
+    
+    return &soft->io_queue[queue_idx];
+    
+#else
+    /* Single queue mode - direct access */
+    return &soft->io_queue;
+#endif
+}
+
 /*
  * Helper: Set SCSI command error with sense data
  */
@@ -76,6 +122,37 @@ nvme_scsi_send_diagnostic(nvme_soft_t *soft, scsi_request_t *req)
     /* For NVMe, we just return success */
     /* Real implementation could use NVMe Device Self-test command if needed */
     nvme_set_success(req);
+    return 0;
+}
+
+/*
+ * nvme_scsi_request_sense - Handle SCSI REQUEST SENSE (0x03)
+ * Returns current sense data (error status from previous command).
+ * Since IRIX already got the error from the original command, return NO SENSE.
+ */
+int
+nvme_scsi_request_sense(nvme_soft_t *soft, scsi_request_t *req)
+{
+    uchar_t *buffer = (uchar_t *)req->sr_buffer;
+    int alloc_len = req->sr_buflen;
+
+    if (alloc_len < 18) {
+        nvme_set_adapter_error(req);
+        return -1;
+    }
+
+    /* Return Fixed Format Sense Data (18 bytes minimum) */
+    bzero(buffer, 18);
+    buffer[0] = 0x70;  /* Response Code: Fixed format, current errors */
+    buffer[2] = 0x00;  /* Sense Key: NO SENSE */
+    buffer[7] = 0x0A;  /* Additional Sense Length: 10 bytes */
+    buffer[12] = 0x00; /* ASC: NO ADDITIONAL SENSE INFORMATION */
+    buffer[13] = 0x00; /* ASCQ: NO ADDITIONAL SENSE INFORMATION */
+
+    req->sr_status = SC_GOOD;
+    req->sr_scsi_status = ST_GOOD;
+    req->sr_sensegotten = 0;
+
     return 0;
 }
 
@@ -486,8 +563,8 @@ nvme_scsi_sync_cache(nvme_soft_t *soft, scsi_request_t *req)
     /* Set namespace ID to 1 (we always use namespace 1) */
     cmd.nsid = 1;
 
-    /* Submit the command to the I/O queue */
-    rc = nvme_submit_cmd(soft, &soft->io_queue, &cmd);
+    /* Submit the command to the I/O queue (selects queue based on CPU) */
+    rc = nvme_submit_cmd(soft, nvme_scsi_select_io_queue(soft), &cmd);
     if (rc != 0) {
 #ifdef NVME_DBG
         cmn_err(CE_WARN, "nvme_scsi_sync_cache: failed to submit flush command");
@@ -663,6 +740,15 @@ nvme_scsi_read_write(nvme_soft_t *soft, scsi_request_t *req)
 
     if (req->sr_buflen > s.max_transfer_blocks * soft->block_size) {
         s.commands = (req->sr_buflen + s.max_transfer_blocks * soft->block_size - 1) / (s.max_transfer_blocks * soft->block_size);
+        
+#if defined(NVME_DBG) || defined(NVME_IP32_DEBUG)
+        cmn_err(CE_NOTE, "nvme: large transfer %u bytes split into %d commands (device max %u bytes)",
+                req->sr_buflen, s.commands, s.max_transfer_blocks * soft->block_size);
+#ifdef NVME_IP32_DEBUG
+        cmn_err(CE_NOTE, "nvme: IP32 DEBUG: LBA=0x%llx, num_blocks=%u, max_xfer_blks=%u",
+                s.lba, s.num_blocks, s.max_transfer_blocks);
+#endif
+#endif
     } else {
         s.commands = 1;
     }
@@ -709,12 +795,13 @@ nvme_scsi_read_write(nvme_soft_t *soft, scsi_request_t *req)
 #endif
 
         /* Build PRP entries for data transfer (sets prp1/prp2, allocates PRP list if needed) */
-#ifdef NVME_DBG_CMD
-        cmn_err(CE_NOTE, "nvme_scsi_read_write: building PRPs for command %u...", s.cidx);
+#if defined(NVME_DBG_CMD) || defined(NVME_IP32_DEBUG)
+        cmn_err(CE_NOTE, "nvme_scsi_read_write: building PRPs for command %u/%u (CID %u)...", 
+                s.cidx+1, s.commands, s.cids[s.cidx]);
 #endif
         rc = nvme_build_prps_from_alenlist(soft, &s);
         if (rc <= 0) {
-#ifdef NVME_DBG
+#if defined(NVME_DBG) || defined(NVME_IP32_DEBUG)
             cmn_err(CE_WARN, "nvme_scsi_read_write: failed to build PRPs for command %u (rc=%d)", s.cidx, rc);
 #endif
             if (rc == 0) {
@@ -724,24 +811,65 @@ nvme_scsi_read_write(nvme_soft_t *soft, scsi_request_t *req)
             /* rc == -1: BUSY already set by nvme_build_prps_from_alenlist */
             goto error_cleanup_cids;
         }
-#ifdef NVME_DBG_CMD
-        cmn_err(CE_NOTE, "nvme_scsi_read_write: PRPs built successfully for command %u, prp1=0x%x%08x prp2=0x%x%08x blocks=%u",
-                s.cidx, s.cmd.prp1_hi, s.cmd.prp1_lo, s.cmd.prp2_hi, s.cmd.prp2_lo, s.cmd.cdw12+1);
+#if defined(NVME_DBG_CMD) || defined(NVME_IP32_DEBUG)
+        cmn_err(CE_NOTE, "nvme_scsi_read_write: PRPs built, CID=%u prp1=0x%x%08x prp2=0x%x%08x blocks=%u",
+                s.cids[s.cidx], s.cmd.prp1_hi, s.cmd.prp1_lo, s.cmd.prp2_hi, s.cmd.prp2_lo, s.cmd.cdw12+1);
 #endif
-        /* Submit the command to the I/O queue */
-#ifdef NVME_DBG_CMD
-        cmn_err(CE_WARN, "nvme_scsi_read_write: submitting NVMe command %u/%u (CID=%d)...", s.cidx+1, s.commands, s.cids[s.cidx]);
+        /* Submit the command to the I/O queue (selects queue based on CPU) */
+#if defined(NVME_DBG_CMD) || defined(NVME_IP32_DEBUG)
+        cmn_err(CE_NOTE, "nvme_scsi_read_write: submitting command %u/%u (CID=%u) to I/O queue...", 
+                s.cidx+1, s.commands, s.cids[s.cidx]);
 #endif
-        rc = nvme_submit_cmd(soft, &soft->io_queue, &s.cmd);
-        if (rc != 0) {
-#ifdef NVME_DBG
-            cmn_err(CE_WARN, "nvme_scsi_read_write: failed to submit command %u", s.cidx);
+        /* Retry submission with backoff if queue is full */
+        {
+            int retry_count = 0;
+            int max_retries = 30;  /* Try up to 30 times (IP32 needs more time for queue to drain) */
+            
+            while ((rc = nvme_submit_cmd(soft, nvme_scsi_select_io_queue(soft), &s.cmd)) != 0) {
+                retry_count++;
+                if (retry_count > max_retries) {
+#if defined(NVME_DBG) || defined(NVME_IP32_DEBUG)
+                    cmn_err(CE_WARN, "nvme_scsi_read_write: queue full after %d retries, giving up on command %u/%u", 
+                            max_retries, s.cidx+1, s.commands);
 #endif
-            nvme_set_adapter_status(req, SC_REQUEST, ST_BUSY);
-            goto error_cleanup_cids;
+                    /* Queue is still full after retries - tell upper layers to retry later */
+                    nvme_set_adapter_status(req, SC_REQUEST, ST_BUSY);
+                    goto error_cleanup_cids;
+                }
+                
+                /* Exponential backoff: 10us, 50us, 100us, 250us, 500us, 1ms, 2ms, 5ms, 10ms, then 20ms for remaining retries */
+                if (retry_count == 1) DELAY(10);
+                else if (retry_count == 2) DELAY(50);
+                else if (retry_count == 3) DELAY(100);
+                else if (retry_count == 4) DELAY(250);
+                else if (retry_count == 5) DELAY(500);
+                else if (retry_count == 6) DELAY(1000);   /* 1ms */
+                else if (retry_count == 7) DELAY(2000);   /* 2ms */
+                else if (retry_count == 8) DELAY(5000);   /* 5ms */
+                else if (retry_count == 9) DELAY(10000);  /* 10ms */
+                else DELAY(20000);  /* 20ms for retries 10-30 */
+                
+#if defined(NVME_DBG) || defined(NVME_IP32_DEBUG)
+                if (retry_count <= 3 || retry_count == max_retries) {
+                    cmn_err(CE_NOTE, "nvme_scsi_read_write: queue full, retry %d/%d for command %u/%u", 
+                            retry_count, max_retries, s.cidx+1, s.commands);
+                }
+#endif
+            }
+            
+#if defined(NVME_DBG) || defined(NVME_IP32_DEBUG)
+            if (retry_count > 0) {
+                cmn_err(CE_NOTE, "nvme_scsi_read_write: succeeded after %d retries for command %u/%u", 
+                        retry_count, s.cidx+1, s.commands);
+            }
+#endif
         }
-#ifdef NVME_DBG_CMD
-        cmn_err(CE_WARN, "nvme_scsi_read_write: command %u/%u submitted to SQ, tail now at %d", s.cidx+1, s.commands, soft->io_queue.sq_tail);
+#if defined(NVME_DBG_CMD) || defined(NVME_IP32_DEBUG)
+        {
+            nvme_queue_t *q = nvme_scsi_select_io_queue(soft);
+            cmn_err(CE_NOTE, "nvme_scsi_read_write: command %u/%u (CID=%u) submitted, SQ tail=%d", 
+                    s.cidx+1, s.commands, s.cids[s.cidx], q->sq_tail);
+        }
 #endif
     }
 
@@ -842,6 +970,10 @@ nvme_scsi_command(scsi_request_t *req)
         rc = nvme_scsi_test_unit_ready(soft, req);
         break;
 
+    case SCSIOP_REQUEST_SENSE:
+        rc = nvme_scsi_request_sense(soft, req);
+        break;
+
     case SCSIOP_INQUIRY:
         rc = nvme_scsi_inquiry(soft, req);
         break;
@@ -933,9 +1065,19 @@ nvme_init_scsi_target_info(nvme_soft_t *soft)
 
     /* Set capability flags */
     soft->tinfo.si_ha_status = SRH_TAGQ | SRH_QERR0 | SRH_ALENLIST | SRH_MAPUSER | SRH_WIDE;
-    soft->tinfo.si_maxq = 32;  /* Max queue depth */
+    
+    /* Increased queue depth for better IOPS
+     * Allows SCSI layer to issue multiple commands in parallel */
+    soft->tinfo.si_maxq = 128;  /* Max queue depth */
     soft->tinfo.si_qdepth = 0;
     soft->tinfo.si_qlimit = 0;
+    
+    /* Transfer size handling:
+     * The scsi_target_info structure does not have si_maxtransfer field in IRIX.
+     * Transfer size is limited by system-wide v.v_maxdmasz (max DMA size in pages).
+     * Our PRP pool (64 pages * 512 entries = 32,768 PRPs) supports ~128MB of
+     * scatter/gather, which is far more than v.v_maxdmasz typically allows.
+     * The driver already handles the maximum transfer sizes IRIX will send. */
 }
 
 /*

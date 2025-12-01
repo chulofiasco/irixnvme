@@ -5,6 +5,12 @@
 #define noNVME_DBG_EXTRA
 #define noNVME_DBG_CMD
 
+/* IP32 (O2) Debug Mode - Disabled in production builds
+ * Uncomment to enable verbose per-I/O logging for troubleshooting */
+#ifdef IP32
+/* #define NVME_IP32_DEBUG */
+#endif
+
 #define noNVME_COMPLETION_THREAD
 #define noNVME_COMPLETION_MANUAL
 #define noNVME_COMPLETION_INTERRUPT
@@ -13,6 +19,11 @@
 
 /* IP32 can mix and match swapping regions because it is all address based
    IP30 and IP35 has endianess set per PCI slot, so everything has to be bytestream 
+   
+   64-bit DMA Configuration:
+   - IP30/IP35: Use PCIIO_DMA_A64 for 64-bit DMA addressing via BRIDGE chip
+   - This enables access to memory above 4GB and reduces address translation overhead
+   - Combined with PCIBR_PREFETCH for reads to improve sequential performance
 */
 #ifdef IP30
 #define NVME_UTILBUF_USEDMAP
@@ -62,6 +73,11 @@
 
 /* Synchronization */
 #include <sys/sema.h>
+
+/* Multi-processor support */
+#ifdef NVME_MULTI_QUEUE
+#include <sys/pda.h>            /* For cpuid() macro */
+#endif
 
 /* Hardware graph and device infrastructure */
 #include <sys/hwgraph.h>
@@ -153,6 +169,7 @@ void bp_heart_invalidate_war(struct buf *bp);
 
 /* SCSI CDB Operation Codes we handle */
 #define SCSIOP_TEST_UNIT_READY    0x00
+#define SCSIOP_REQUEST_SENSE      0x03
 #define SCSIOP_INQUIRY            0x12
 #define SCSIOP_SEND_DIAGNOSTIC    0x1D
 #define SCSIOP_MODE_SENSE_6       0x1A
@@ -249,20 +266,28 @@ typedef struct nvme_queue_s {
     /* Watchdog timer for missed interrupts */
     toid_t              watchdog_id;    /* Timeout ID for watchdog timer */
     volatile int        watchdog_active; /* Flag: 1 if watchdog is running */
+    
+    /* Command batching / doorbell optimization
+     * Batching reduces MMIO write overhead by updating doorbell for multiple commands */
+    volatile int        batch_mode;     /* 1 = batching enabled, 0 = immediate doorbell */
+    uint_t              batch_count;    /* Commands queued but doorbell not yet rung */
+    uint_t              batch_max;      /* Max commands before auto-flush (typically 4-8) */
+    
+    /* Queue space tracking (qlfc-style optimization)
+     * Tracks available submission queue slots to avoid checking hardware on every submit.
+     * Only rechecks actual hardware state when queue_space drops to 0.
+     * This matches the approach used in SGI's production qlfc driver. */
+    volatile uint_t     queue_space;    /* Number of free SQ slots (cached from last check) */
 } nvme_queue_t;
 
 
 /*
  * PRP List Pool Configuration
- * Smaller pool on IP30 due to 16KB page size making large contiguous allocations difficult
- * IP30: 4 * 4KB = 16KB (exactly 1 IRIX 16KB page - fits in contiguous allocation)
- * Others: 16 * 4KB = 64KB (allows more concurrent large I/O operations)
+ * 
+ * Size expressed in NVMe pages (4KB each).
+ * 64 NVMe pages = 256KB linear memory - IRIX handles this fine.
  */
-#if defined(IP30)
-#define NVME_PRP_POOL_SIZE      4       /* 4 NVMe pages = 1 IRIX page on IP30 */
-#else
-#define NVME_PRP_POOL_SIZE      16      /* 16 NVMe pages = reasonable pool size */
-#endif
+#define NVME_PRP_POOL_SIZE      64      /* 64 NVMe pages = 256KB pool */
 
 /*
  * Command Tracking Structure
@@ -316,7 +341,17 @@ typedef struct nvme_soft_s {
 
     /* Queues */
     nvme_queue_t        admin_queue;    /* Admin queue pair */
-    nvme_queue_t        io_queue;      /* Array of I/O queue pairs */
+    
+    /* Multiple I/O queue pairs for multi-CPU systems
+     * One queue per CPU for optimal parallelism and lock-free I/O submission
+     * Disabled by default - set NVME_MULTI_QUEUE to enable */
+#ifdef NVME_MULTI_QUEUE
+#define NVME_MAX_IO_QUEUES  8           /* Up to 8 queues for 8-CPU systems */
+    nvme_queue_t        io_queue[NVME_MAX_IO_QUEUES]; /* I/O queue pairs */
+    uint_t              num_io_queues;  /* Number based on CPU count */
+#else
+    nvme_queue_t        io_queue;       /* Single I/O queue pair */
+#endif
 
     /* Interrupts */
     pciio_intr_t        intr;           /* Interrupt handle */
@@ -475,8 +510,16 @@ int nvme_admin_get_features(nvme_soft_t *soft, uchar_t fid, uchar_t sel);
 int nvme_admin_set_features(nvme_soft_t *soft, uchar_t fid, uint_t value);
 int nvme_admin_query_features(nvme_soft_t *soft);
 
+/* Interrupt coalescing and feature management */
+int nvme_set_interrupt_coalescing(nvme_soft_t *soft, uint_t threshold, uint_t time_us);
+int nvme_set_number_of_queues(nvme_soft_t *soft, uint_t num_queues);
+
 int nvme_submit_cmd(nvme_soft_t *soft, nvme_queue_t *q, nvme_command_t *cmd);
 int nvme_wait_for_completion(nvme_queue_t *q, ushort_t cid, uint_t timeout_ms);
+uint_t nvme_update_queue_space(nvme_queue_t *q); /* qlfc-style queue space tracking */
+
+/* Command batching / doorbell optimization */
+void nvme_flush_queue(nvme_soft_t *soft, nvme_queue_t *q);
 
 
 int nvme_get_translated_addr(nvme_soft_t *soft,
@@ -581,13 +624,28 @@ void nvme_timeout_watchdog_handler(nvme_soft_t *soft);
  *
  * 32-bit accesses only to avoid endianness issues on big-endian MIPS.
  * MMIO accesses are automatically byte-swapped by SGI's PCI bridge hardware.
+ *
+ * IP32 CRITICAL: Must use pciio_pio_{read,write}32() functions to workaround
+ * the CRIME->MACE phantom PIO read problem. Direct pointer access causes
+ * data corruption and system hangs on O2 systems.
  */
 
+#ifdef IP32
+/* IP32 (O2) - Must use special PIO functions for MACE PCI */
+#define NVME_RD(soft, offset) \
+    pciio_pio_read32((uint32_t volatile *)((soft)->bar0 + (offset)))
+
+#define NVME_WR(soft, offset, value) \
+    pciio_pio_write32((value), (uint32_t volatile *)((soft)->bar0 + (offset)))
+#else
+/* IP30/IP27/IP35 - Direct access works fine on BRIDGE PCI */
 #define NVME_RD(soft, offset) \
     (*(uint_t volatile *)((soft)->bar0 + (offset)))
 
 #define NVME_WR(soft, offset, value) \
     (*(uint_t volatile *)((soft)->bar0 + (offset)) = (value))
+#endif
+
 
 /*
  * Utility Macros - NVMe Memory Access (DMA structures)

@@ -9,6 +9,11 @@
 # Enable with: chkconfig nvme on
 # Disable with: chkconfig nvme off
 #
+# Verbose mode:
+#   IP30/IP32: Controlled by /etc/chkconfig/verbose (chkconfig verbose on/off)
+#   IP35:      Controlled by nvme_verbose tunable in /var/sysgen/master.d/nvme
+#              Set nvme_verbose=1 in master file, then rebuild kernel (autoconfig)
+#
 
 IS_ON=/etc/chkconfig
 MODULE=/var/sysgen/boot/nvme.o

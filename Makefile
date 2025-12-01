@@ -21,9 +21,15 @@ COMMON_CFLAGS=-O3
 LDFLAGS_IP35=-nostdlib -64 -mips4
 LDFLAGS_IP30=-nostdlib -64 -mips4
 LDFLAGS_IP32=-nostdlib -n32 -mips3
-MYCFLAGS_IP35=-mips4 -DPTE_64BIT
-MYCFLAGS_IP30=-mips4 -DPTE_64BIT -DHEART_INVALIDATE_WAR
-MYCFLAGS_IP32=-mips3
+# Multi-queue: Enable on platforms that commonly have >1 CPU
+# IP35 (Tezro): Up to 4 CPUs - always enable
+# IP30 (Octane): 1-2 CPUs - enable (gracefully handles single CPU)
+# IP27 (Origin): 2-128 CPUs - always enable
+# IP32 (O2): Always single CPU - disable
+MYCFLAGS_IP35=-mips4 -DPTE_64BIT -DIP35 -DNVME_MULTI_QUEUE
+MYCFLAGS_IP30=-mips4 -DPTE_64BIT -DIP30 -DHEART_INVALIDATE_WAR -DNVME_MULTI_QUEUE
+MYCFLAGS_IP27=-mips4 -DPTE_64BIT -DIP27 -DNVME_MULTI_QUEUE
+MYCFLAGS_IP32=-mips3 -DIP32
 
 #if $(CPUBOARD) == "IP30"
 MYCFLAGS=$(MYCFLAGS_IP30) $(COMMON_FLAGS) $(COMMON_CFLAGS)
@@ -33,6 +39,9 @@ MYCFLAGS=$(MYCFLAGS_IP32) $(COMMON_FLAGS) $(COMMON_CFLAGS)
 LDFLAGS=$(LDFLAGS_IP32) $(COMMON_FLAGS) $(COMMON_LDFLAGS)
 #elif $(CPUBOARD) == "IP35"
 MYCFLAGS=$(MYCFLAGS_IP35) $(COMMON_FLAGS) $(COMMON_CFLAGS)
+LDFLAGS=$(LDFLAGS_IP35) $(COMMON_FLAGS) $(COMMON_LDFLAGS)
+#elif $(CPUBOARD) == "IP27"
+MYCFLAGS=$(MYCFLAGS_IP27) $(COMMON_FLAGS) $(COMMON_CFLAGS)
 LDFLAGS=$(LDFLAGS_IP35) $(COMMON_FLAGS) $(COMMON_LDFLAGS)
 #else
 #endif
@@ -104,21 +113,10 @@ mkparts:
 	cc -o mkparts mkparts.c
 	chmod +x mkparts
 
-# Build nvmetest utility
-# Auto-detects controller from syslog, or use: smake nvmetest CTLR=X
-nvmetest:
+# Build nvmetest utility (auto-detects controller at runtime)
+nvmetest: nvmetest.c
 	@echo "Building nvmetest..."
-	@rm -f nvmetest
-	@if [ -z "$$CTLR" ]; then \
-		CTLR=`grep 'nvme.*assigned adapter=' /var/adm/SYSLOG 2>/dev/null | tail -1 | sed 's/.*adapter=\([0-9][0-9]*\).*/\1/'`; \
-		if [ -z "$$CTLR" ]; then \
-			echo "WARNING: Could not detect NVMe controller from syslog"; \
-			echo "Please specify controller: smake nvmetest CTLR=X"; \
-			exit 1; \
-		fi; \
-	fi; \
-	echo "Building for controller $$CTLR"; \
-	cc -woff 3970 -DCTLR_NUM=$$CTLR -o nvmetest nvmetest.c; \
+	cc -woff 3970 -o nvmetest nvmetest.c
 	chmod +x nvmetest
 
 # Build both mkparts and nvmetest utilities

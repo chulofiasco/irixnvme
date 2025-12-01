@@ -17,3 +17,6 @@
 cbdRs nvme_       -    -
 $$$
 major_t nvme_majnum = ##E;
+
+/* Tunable parameters */
+int nvme_verbose = 0;  /* Set to 1 for verbose diagnostic messages */
