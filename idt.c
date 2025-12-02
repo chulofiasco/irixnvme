@@ -14,13 +14,13 @@
  *  - O_DIRECT support with aligned buffers (4096-byte alignment)
  *
  * Compile:
- *   cc -o irix_diskperf irix_diskperf.c -lpthread
+ *   cc -o idt idt.c -lpthread
  *
  * Usage:
- *   irix_diskperf              # Interactive mode
- *   irix_diskperf --direct     # Enable O_DIRECT for direct I/O
- *   irix_diskperf --help       # Show help message
- *   irix_diskperf --version    # Show version information
+ *   idt              # Interactive mode
+ *   idt --direct     # Enable O_DIRECT for direct I/O
+ *   idt --help       # Show help message
+ *   idt --version    # Show version information
  *
  * Notes:
  *  - Run as root for best affinity behavior and raw device access.
@@ -508,7 +508,7 @@ static void print_help(const char *prog_name) {
     printf("NOTES:\n");
     printf("  - Run as root for best CPU affinity behavior and raw device access\n");
     printf("  - This tool is C89-compatible and designed for IRIX 6.5\n");
-    printf("  - Compile: cc -o irix_diskperf idt.c -lpthread\n");
+    printf("  - Compile: cc -o idt idt.c -lpthread\n");
     printf("\n");
 }
 
@@ -566,12 +566,6 @@ int main(int argc, char **argv) {
         printf("\nDirect I/O mode ENABLED (O_DIRECT flag will be used)\n");
         printf("  - Kernel buffer cache will be bypassed\n");
         printf("  - Buffers aligned to %d bytes\n", ALIGNMENT);
-        if (cfg.block_size % ALIGNMENT != 0) {
-            fprintf(stderr, "\nWARNING: Block size (%zu) is not aligned to %d bytes.\n", 
-                    cfg.block_size, ALIGNMENT);
-            fprintf(stderr, "         This may cause I/O errors with O_DIRECT.\n");
-            fprintf(stderr, "         Recommended block sizes: 4096, 8192, 16384, etc.\n\n");
-        }
     }
 
     /* workload selection */
@@ -593,6 +587,15 @@ int main(int argc, char **argv) {
     cfg.threads = prompt_int("Number of threads", cfg.threads, 1, MAX_THREADS);
     cfg.duration = prompt_int("Duration (seconds)", cfg.duration, 1, 36000);
     cfg.block_size = (size_t)prompt_int("Block size (bytes)", (int)cfg.block_size, 512, 16 * 1024 * 1024);
+    
+    /* Validate block size alignment if using O_DIRECT */
+    if (cfg.use_direct_io && cfg.block_size % ALIGNMENT != 0) {
+        fprintf(stderr, "\nWARNING: Block size (%zu) is not aligned to %d bytes.\n", 
+                cfg.block_size, ALIGNMENT);
+        fprintf(stderr, "         This may cause I/O errors with O_DIRECT.\n");
+        fprintf(stderr, "         Recommended block sizes: 4096, 8192, 16384, etc.\n\n");
+    }
+    
     printf("Mode: 1) read  2) write\n");
     choice = prompt_int("Choose mode", (cfg.mode == MODE_READ) ? 1 : 2, 1, 2);
     cfg.mode = (choice == 2) ? MODE_WRITE : MODE_READ;
