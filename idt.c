@@ -5,18 +5,27 @@
  * with:
  *  - 3 workload modes (one-file-per-thread, shared file, raw device)
  *  - Interactive menu for options
+ *  - Command-line options: --help, --version, --direct (O_DIRECT I/O)
  *  - Defaults: 2 GB per-file, 4 KB block
  *  - pthreads worker threads
  *  - CPU affinity per thread using sysmp(MP_MUSTRUN, cpu) (Option 1 mapping)
  *  - Per-thread live stats: one-shot 'l' and continuous 'L' toggle
  *  - Comprehensive logging into diskperf_logs/run_YYYY-MM-DD_HH-MM-SS.log
+ *  - O_DIRECT support with aligned buffers (4096-byte alignment)
  *
  * Compile:
  *   cc -o irix_diskperf irix_diskperf.c -lpthread
  *
+ * Usage:
+ *   irix_diskperf              # Interactive mode
+ *   irix_diskperf --direct     # Enable O_DIRECT for direct I/O
+ *   irix_diskperf --help       # Show help message
+ *   irix_diskperf --version    # Show version information
+ *
  * Notes:
  *  - Run as root for best affinity behavior and raw device access.
  *  - This file is written to be C89-compatible.
+ *  - O_DIRECT bypasses kernel buffer cache for more accurate performance testing.
  */
 
 #include <stdio.h>
@@ -45,6 +54,8 @@
 #define MAX_THREADS 128
 #define PATH_MAX_LEN 512
 #define LOGDIR "diskperf_logs"
+#define VERSION "0.1.0"
+#define ALIGNMENT 4096  /* O_DIRECT requires 4096-byte alignment */
 
 typedef enum { MODE_READ, MODE_WRITE } mode_t;
 typedef enum { PATTERN_SEQ, PATTERN_RAND } pattern_t;
@@ -61,6 +72,7 @@ struct cfg {
     mode_t mode;
     pattern_t pattern;
     off_t alloc_mb;
+    int use_direct_io;  /* flag for O_DIRECT */
 };
 
 struct thread_info {
@@ -104,6 +116,7 @@ static void build_thread_path(char *out, size_t outlen, const char *base, int ti
 static void *thread_main(void *arg) {
     struct thread_info *ti = (struct thread_info *)arg;
     char *buf;
+    char *aligned_buf = NULL;
     off_t offset = 0;
     ssize_t r;
     size_t bs = ti->block_size;
@@ -111,11 +124,15 @@ static void *thread_main(void *arg) {
     int ncpus;
     int cpu;
 
-    buf = (char *)malloc(bs);
+    /* Allocate buffer with extra space for alignment if needed */
+    buf = (char *)malloc(bs + ALIGNMENT);
     if (!buf) {
         perror("malloc");
         return NULL;
     }
+    
+    /* Align buffer to ALIGNMENT boundary for O_DIRECT */
+    aligned_buf = (char *)(((unsigned long)buf + ALIGNMENT - 1) & ~(ALIGNMENT - 1));
 
     /* CPU affinity Option 1: map thread id to cpu id modulo ncpus */
     ncpus = (int)sysconf(_SC_NPROCESSORS_CONF);
@@ -128,7 +145,7 @@ static void *thread_main(void *arg) {
 
     if (ti->mode == MODE_WRITE) {
         int i;
-        for (i = 0; i < (int)bs; ++i) buf[i] = (char)(0x5A + (ti->id & 0xFF));
+        for (i = 0; i < (int)bs; ++i) aligned_buf[i] = (char)(0x5A + (ti->id & 0xFF));
     }
 
     ti->seed = (unsigned int)(time(NULL) ^ ti->id ^ getpid());
@@ -152,7 +169,7 @@ static void *thread_main(void *arg) {
         }
 
         if (ti->mode == MODE_READ) {
-            r = read(ti->fd, buf, bs);
+            r = read(ti->fd, aligned_buf, bs);
             if (r <= 0) {
                 if (r == 0) {
                     if (lseek(ti->fd, ti->region_offset, SEEK_SET) == (off_t)-1) { }
@@ -166,7 +183,7 @@ static void *thread_main(void *arg) {
             ti->bytes += (unsigned long long)r;
             pthread_mutex_unlock(&g_stats_lock);
         } else {
-            r = write(ti->fd, buf, bs);
+            r = write(ti->fd, aligned_buf, bs);
             if (r <= 0) {
                 continue;
             }
@@ -414,6 +431,87 @@ static void *stats_watcher(void *varg) {
     return NULL;
 }
 
+/* Print version information */
+static void print_version(void) {
+    printf("IRIX Disk Performance Tester - Version %s\n", VERSION);
+    printf("A C89-compatible interactive disk performance testing tool for IRIX 6.5\n");
+}
+
+/* Print help/usage information */
+static void print_help(const char *prog_name) {
+    printf("IRIX Disk Performance Tester - Version %s\n", VERSION);
+    printf("\n");
+    printf("USAGE:\n");
+    printf("  %s [OPTIONS]\n", prog_name);
+    printf("\n");
+    printf("OPTIONS:\n");
+    printf("  -h, --help          Display this help message and exit\n");
+    printf("  -v, --version       Display version information and exit\n");
+    printf("  -d, --direct        Enable O_DIRECT flag for direct I/O (bypasses kernel cache)\n");
+    printf("                      Requires buffer alignment to %d bytes\n", ALIGNMENT);
+    printf("\n");
+    printf("DESCRIPTION:\n");
+    printf("  This tool performs disk performance testing with various workload patterns.\n");
+    printf("  When run without options, it starts in interactive mode where you can\n");
+    printf("  configure all test parameters.\n");
+    printf("\n");
+    printf("WORKLOAD MODES:\n");
+    printf("  Option A - One file per thread\n");
+    printf("    Each thread operates on its own separate file. Best for testing parallel\n");
+    printf("    write performance with minimal contention.\n");
+    printf("\n");
+    printf("  Option B - Single shared file with per-thread regions\n");
+    printf("    All threads share a single file but operate on different regions. Tests\n");
+    printf("    concurrent access to the same file.\n");
+    printf("\n");
+    printf("  Option C - Raw device per thread\n");
+    printf("    Each thread accesses a raw device directly. For testing raw device\n");
+    printf("    performance or using the same device with multiple threads.\n");
+    printf("\n");
+    printf("PARAMETERS (configured interactively):\n");
+    printf("  Threads:    Number of parallel worker threads (1-%d)\n", MAX_THREADS);
+    printf("  Duration:   Test duration in seconds\n");
+    printf("  Block size: I/O block size in bytes (default: %d)\n", DEFAULT_BLOCK);
+    printf("  Mode:       read or write operations\n");
+    printf("  Pattern:    sequential or random I/O access pattern\n");
+    printf("\n");
+    printf("RUNTIME CONTROLS:\n");
+    printf("  l - Print one-shot per-thread snapshot (single display)\n");
+    printf("  L - Toggle continuous per-second per-thread live stats on/off\n");
+    printf("  q - Request early stop of the test\n");
+    printf("\n");
+    printf("DIRECT I/O (--direct option):\n");
+    printf("  When enabled, uses O_DIRECT flag to bypass kernel buffer cache.\n");
+    printf("  Benefits:\n");
+    printf("    - More accurate disk performance measurement\n");
+    printf("    - Avoids cache pollution\n");
+    printf("    - Tests actual disk speeds, not memory cache speeds\n");
+    printf("  Requirements:\n");
+    printf("    - Buffers must be aligned to %d bytes\n", ALIGNMENT);
+    printf("    - File offsets should be aligned to filesystem block size\n");
+    printf("  Note: Not all filesystems support O_DIRECT on all operations.\n");
+    printf("\n");
+    printf("EXAMPLES:\n");
+    printf("  # Start in interactive mode\n");
+    printf("  %s\n", prog_name);
+    printf("\n");
+    printf("  # Start with direct I/O enabled\n");
+    printf("  %s --direct\n", prog_name);
+    printf("\n");
+    printf("  # Show version\n");
+    printf("  %s --version\n", prog_name);
+    printf("\n");
+    printf("OUTPUT:\n");
+    printf("  Results are logged to: %s/run_YYYY-MM-DD_HH-MM-SS.log\n", LOGDIR);
+    printf("  Live statistics show MB/s, IOPS, and completion percentage per thread.\n");
+    printf("\n");
+    printf("NOTES:\n");
+    printf("  - Run as root for best CPU affinity behavior and raw device access\n");
+    printf("  - This tool is C89-compatible and designed for IRIX 6.5\n");
+    printf("  - Compile: cc -o irix_diskperf idt.c -lpthread\n");
+    printf("\n");
+}
+
 /* Main program */
 int main(int argc, char **argv) {
     struct cfg cfg;
@@ -441,10 +539,40 @@ int main(int argc, char **argv) {
     cfg.mode = MODE_READ;
     cfg.pattern = PATTERN_SEQ;
     cfg.alloc_mb = DEFAULT_ALLOC_MB;
+    cfg.use_direct_io = 0;  /* disabled by default */
+
+    /* Parse command-line arguments */
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_help(argv[0]);
+            return 0;
+        } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
+            print_version();
+            return 0;
+        } else if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--direct") == 0) {
+            cfg.use_direct_io = 1;
+        } else {
+            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            fprintf(stderr, "Use -h or --help for usage information.\n");
+            return 1;
+        }
+    }
 
     printf("IRIX Disk Performance Tester (interactive)\n");
     printf("Defaults: block=%d bytes, alloc=%ld MB per-file (if applicable)\n",
            DEFAULT_BLOCK, (long)DEFAULT_ALLOC_MB);
+    
+    if (cfg.use_direct_io) {
+        printf("\nDirect I/O mode ENABLED (O_DIRECT flag will be used)\n");
+        printf("  - Kernel buffer cache will be bypassed\n");
+        printf("  - Buffers aligned to %d bytes\n", ALIGNMENT);
+        if (cfg.block_size % ALIGNMENT != 0) {
+            fprintf(stderr, "\nWARNING: Block size (%zu) is not aligned to %d bytes.\n", 
+                    cfg.block_size, ALIGNMENT);
+            fprintf(stderr, "         This may cause I/O errors with O_DIRECT.\n");
+            fprintf(stderr, "         Recommended block sizes: 4096, 8192, 16384, etc.\n\n");
+        }
+    }
 
     /* workload selection */
     printf("\nSelect workload option:\n");
@@ -489,11 +617,12 @@ int main(int argc, char **argv) {
         strftime(timestr, sizeof(timestr), "%Y-%m-%d %H:%M:%S", tm);
         fprintf(logf, "Run start: %s\n", timestr);
         fprintf(logf, "Workload: %d  base: %s\n", (int)cfg.workload, cfg.base_path);
-        fprintf(logf, "threads=%d duration=%d block=%zu mode=%s pattern=%s alloc_mb=%ld\n",
+        fprintf(logf, "threads=%d duration=%d block=%zu mode=%s pattern=%s alloc_mb=%ld direct_io=%s\n",
                 cfg.threads, cfg.duration, cfg.block_size,
                 (cfg.mode == MODE_READ) ? "read" : "write",
                 (cfg.pattern == PATTERN_SEQ) ? "sequential" : "random",
-                (long)cfg.alloc_mb);
+                (long)cfg.alloc_mb,
+                cfg.use_direct_io ? "enabled" : "disabled");
         fprintf(logf, "Log file: %s\n", logfile_path);
         fflush(logf);
         printf("Writing run log to: %s\n", logfile_path);
@@ -509,11 +638,12 @@ int main(int argc, char **argv) {
     } else {
         printf("  Workload: Raw device per thread\n  Device template: %s\n", cfg.base_path);
     }
-    printf("  threads=%d  duration=%d  block=%zu  mode=%s  pattern=%s  alloc_mb=%ld\n\n",
+    printf("  threads=%d  duration=%d  block=%zu  mode=%s  pattern=%s  alloc_mb=%ld  direct_io=%s\n\n",
            cfg.threads, cfg.duration, cfg.block_size,
            (cfg.mode == MODE_READ) ? "read" : "write",
            (cfg.pattern == PATTERN_SEQ) ? "sequential" : "random",
-           (long)cfg.alloc_mb);
+           (long)cfg.alloc_mb,
+           cfg.use_direct_io ? "enabled" : "disabled");
 
     printf("Controls during run:\n");
     printf("  l = one-shot per-thread snapshot (prints once and logs)\n");
@@ -535,9 +665,19 @@ int main(int argc, char **argv) {
             if (cfg.mode == MODE_WRITE) flags = O_RDWR | O_CREAT | O_TRUNC;
             else flags = O_RDONLY;
             if (cfg.mode == MODE_WRITE) flags |= O_SYNC;
+            if (cfg.use_direct_io) {
+#ifdef O_DIRECT
+                flags |= O_DIRECT;
+#else
+                fprintf(stderr, "WARNING: O_DIRECT not supported on this platform, ignoring --direct flag\n");
+#endif
+            }
             fd = open(path, flags, 0644);
             if (fd < 0) {
                 fprintf(stderr, "open(%s) failed: %s\n", path, strerror(errno));
+                if (cfg.use_direct_io && errno == EINVAL) {
+                    fprintf(stderr, "  Note: O_DIRECT may not be supported on this filesystem or device\n");
+                }
                 int j;
                 for (j = 0; j < i; ++j) close(fds[j]);
                 if (logf) fprintf(logf, "open(%s) failed: %s\n", path, strerror(errno));
@@ -562,9 +702,19 @@ int main(int argc, char **argv) {
             if (cfg.mode == MODE_WRITE) flags = O_RDWR | O_CREAT;
             else flags = O_RDONLY;
             if (cfg.mode == MODE_WRITE) flags |= O_SYNC;
+            if (cfg.use_direct_io) {
+#ifdef O_DIRECT
+                flags |= O_DIRECT;
+#else
+                fprintf(stderr, "WARNING: O_DIRECT not supported on this platform, ignoring --direct flag\n");
+#endif
+            }
             fd = open(path, flags, 0644);
             if (fd < 0) {
                 fprintf(stderr, "open(%s) failed: %s\n", path, strerror(errno));
+                if (cfg.use_direct_io && errno == EINVAL) {
+                    fprintf(stderr, "  Note: O_DIRECT may not be supported on this filesystem or device\n");
+                }
                 int j;
                 for (j = 0; j < i; ++j) close(fds[j]);
                 if (logf) fprintf(logf, "open(%s) failed: %s\n", path, strerror(errno));
@@ -592,9 +742,19 @@ int main(int argc, char **argv) {
             build_thread_path(path, sizeof(path), cfg.base_path, i);
             if (cfg.mode == MODE_WRITE) flags = O_RDWR;
             else flags = O_RDONLY;
+            if (cfg.use_direct_io) {
+#ifdef O_DIRECT
+                flags |= O_DIRECT;
+#else
+                fprintf(stderr, "WARNING: O_DIRECT not supported on this platform, ignoring --direct flag\n");
+#endif
+            }
             fd = open(path, flags);
             if (fd < 0) {
                 fprintf(stderr, "open(%s) failed: %s\n", path, strerror(errno));
+                if (cfg.use_direct_io && errno == EINVAL) {
+                    fprintf(stderr, "  Note: O_DIRECT may not be supported on this filesystem or device\n");
+                }
                 int j;
                 for (j = 0; j < i; ++j) close(fds[j]);
                 if (logf) fprintf(logf, "open(%s) failed: %s\n", path, strerror(errno));
