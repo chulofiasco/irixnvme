@@ -61,6 +61,7 @@ MODULE = nvme.o
 # Utilities
 MKPARTS = mkparts
 NVMETEST = nvmetest
+IDT = idt
 
 # Default target
 all: $(MODULE)
@@ -106,7 +107,7 @@ list:
 
 # Clean build artifacts
 clean:
-	rm -f $(OBJS) $(MODULE) $(MKPARTS) $(NVMETEST)
+	rm -f $(OBJS) $(MODULE) $(MKPARTS) $(NVMETEST) $(IDT)
 
 # Build the mkparts utility (explicit rule)
 mkparts:
@@ -119,8 +120,14 @@ nvmetest: nvmetest.c
 	cc -woff 3970 -o nvmetest nvmetest.c
 	chmod +x nvmetest
 
-# Build both mkparts and nvmetest utilities
-tools: mkparts nvmetest
+# Build idt utility (interactive disk performance tester)
+idt: idt.c
+	@echo "Building idt..."
+	cc -o idt idt.c -lpthread
+	chmod +x idt
+
+# Build all utilities
+tools: mkparts nvmetest idt
 	@echo "Built NVMe Utilities."
 
 # Check/create partition device nodes after loading driver
@@ -253,9 +260,16 @@ install: $(MODULE)
 	fi
 	cp $(NVMETEST) /sbin/nvmetest
 	chmod 755 /sbin/nvmetest
+	@if [ ! -f $(IDT) ]; then \
+		echo "Building idt..."; \
+		$(MAKE) idt; \
+	fi
+	cp $(IDT) /sbin/idt
+	chmod 755 /sbin/idt
 	@echo "Creating symlinks in /usr/bin..."
 	@ln -sf /sbin/mkparts /usr/bin/mkparts
 	@ln -sf /sbin/nvmetest /usr/bin/nvmetest
+	@ln -sf /sbin/idt /usr/bin/idt
 	@echo "Installing man pages..."
 	@mkdir -p /usr/share/catman/local/cat1
 	@if [ -f mkparts.1 ]; then \
@@ -277,8 +291,10 @@ install: $(MODULE)
 	@echo "Utilities installed:"
 	@echo "  /sbin/mkparts (create device nodes)"
 	@echo "  /sbin/nvmetest (NVMe test utility)"
+	@echo "  /sbin/idt (disk performance tester)"
 	@echo "  /usr/bin/mkparts -> /sbin/mkparts (symlink)"
 	@echo "  /usr/bin/nvmetest -> /sbin/nvmetest (symlink)"
+	@echo "  /usr/bin/idt -> /sbin/idt (symlink)"
 	@echo ""
 	@echo "Running autoconfig to rebuild kernel configuration..."
 	@/etc/autoconfig
@@ -332,9 +348,9 @@ uninstall:
 	@echo "Removing driver module..."
 	@rm -f /var/sysgen/boot/nvme.o
 	@echo "Removing utilities..."
-	@rm -f /sbin/mkparts /sbin/nvmetest
+	@rm -f /sbin/mkparts /sbin/nvmetest /sbin/idt
 	@echo "Removing utility symlinks..."
-	@rm -f /usr/bin/mkparts /usr/bin/nvmetest
+	@rm -f /usr/bin/mkparts /usr/bin/nvmetest /usr/bin/idt
 	@echo "Removing man pages..."
 	@rm -f /usr/share/catman/local/cat1/mkparts.1
 	@rm -f /usr/share/catman/local/cat1/nvmetest.1
@@ -353,6 +369,8 @@ uninstall:
 	@echo "  /etc/rc2.d/S05nvme (startup symlink)"
 	@echo "  /sbin/mkparts, /sbin/nvmetest (utilities)"
 	@echo "  /usr/bin/mkparts, /usr/bin/nvmetest (symlinks)"
+	@echo "  /sbin/idt (disk performance tester)"
+	@echo "  /usr/bin/idt (symlink)"
 	@echo "  /usr/share/catman/local/cat1/mkparts.1 (man page)"
 	@echo "  /usr/share/catman/local/cat1/nvmetest.1 (man page)"
 	@echo "  /usr/share/catman/local/cat1/idt.1 (man page)"
@@ -419,4 +437,4 @@ help:
 	@echo "  ml list                 # List modules"
 
 # Phony targets (not actual files)
-.PHONY: all debug tools mkparts nvmetest makeparts test setup load list clean install uninstall reboot ioc help
+.PHONY: all debug tools mkparts nvmetest idt makeparts test setup load list clean install uninstall reboot ioc help
