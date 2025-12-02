@@ -1,5 +1,5 @@
 /*
- * irix_diskperf.c
+ * idt.c
  *
  * C89-compatible interactive disk performance tester for IRIX 6.5,
  * with:
