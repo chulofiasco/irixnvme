@@ -1,0 +1,83 @@
+.TH idt 1M "December 2025" "IRIX NVMe Driver 0.9.4"
+.SH NAME
+idt \- Disk performance tester for IRIX NVMe
+.SH SYNOPSIS
+.nf
+\fBidt\fR
+.SH DESCRIPTION
+.I idt
+is an interactive disk performance testing utility for IRIX 6.5 that
+benchmarks disk I/O performance using different workload modes and
+access patterns. It uses pthreads for multi-threaded testing and
+provides real-time performance statistics.
+.PP
+The utility supports three distinct workload modes:
+.IP \(bu 2
+One file per thread - each thread operates on its own file
+.IP \(bu 2
+Shared file with per-thread regions - all threads share a single file
+with divided regions
+.IP \(bu 2
+Raw device per thread - each thread accesses a raw device or partition
+.PP
+.I idt
+runs interactively, prompting the user for all configuration options
+including workload type, file paths, number of threads, test duration,
+block size, I/O mode (read/write), and access pattern (sequential/random).
+.PP
+Performance results are logged to timestamped files in the diskperf_logs
+directory and displayed on screen during and after test execution.
+.SH OPTIONS
+.I idt
+currently operates in fully interactive mode with no command-line
+options. All configuration is done through interactive prompts.
+.SH INTERACTIVE CONTROLS
+During test execution, the following keyboard commands are available:
+.TP
+.B l
+Display one-shot per-thread performance snapshot (prints once and logs)
+.TP
+.B L
+Toggle continuous per-second per-thread live statistics on/off
+.TP
+.B q
+Request early test termination
+.SH EXAMPLES
+Run the disk performance tester interactively:
+.PP
+.nf
+idt
+.PP
+The program will prompt for:
+.IP \(bu 2
+Workload option (1=one file per thread, 2=shared file, 3=raw device)
+.IP \(bu 2
+File or device path (may use %d placeholder for thread number)
+.IP \(bu 2
+Number of threads (1-128)
+.IP \(bu 2
+Test duration in seconds
+.IP \(bu 2
+Block size in bytes (512 to 16MB)
+.IP \(bu 2
+I/O mode (read or write)
+.IP \(bu 2
+Access pattern (sequential or random)
+.IP \(bu 2
+Pre-allocation size in MB (workload-dependent)
+.SH FILES
+.TP
+.I diskperf_logs/run_YYYY-MM-DD_HH-MM-SS.log
+Timestamped log files containing detailed test results
+.SH AUTHORS
+IRIX NVMe Driver Project
+.SH COPYRIGHT
+Copyright \(co 2025 IRIX NVMe Driver Project.
+.br
+Licensed under the GNU GPL version 2 or later.
+.br
+This is free software; you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+.SH SEE ALSO
+.BR mkparts (1M),
+.BR nvmetest (1M)

@@ -264,6 +264,9 @@ install: $(MODULE)
 	@if [ -f nvmetest.1 ]; then \
 		cp nvmetest.1 /usr/share/catman/local/cat1/nvmetest.1; \
 	fi
+	@if [ -f idt.1 ]; then \
+		cp idt.1 /usr/share/catman/local/cat1/idt.1; \
+	fi
 	@echo ""
 	@echo "Driver installed to /var/sysgen/boot/nvme.o"
 	@echo "Configuration files installed:"
@@ -335,6 +338,7 @@ uninstall:
 	@echo "Removing man pages..."
 	@rm -f /usr/share/catman/local/cat1/mkparts.1
 	@rm -f /usr/share/catman/local/cat1/nvmetest.1
+	@rm -f /usr/share/catman/local/cat1/idt.1
 	@echo ""
 	@echo "Running autoconfig to rebuild kernel configuration..."
 	@/etc/autoconfig
@@ -351,6 +355,7 @@ uninstall:
 	@echo "  /usr/bin/mkparts, /usr/bin/nvmetest (symlinks)"
 	@echo "  /usr/share/catman/local/cat1/mkparts.1 (man page)"
 	@echo "  /usr/share/catman/local/cat1/nvmetest.1 (man page)"
+	@echo "  /usr/share/catman/local/cat1/idt.1 (man page)"
 	@echo ""
 	@echo "Kernel rebuilt without NVMe driver."
 	@echo ""
